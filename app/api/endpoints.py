@@ -1,4 +1,8 @@
 from fastapi import APIRouter, UploadFile, File, Form
+import base64
+from redis import Redis
+from rq import Queue
+from rq.job import Job
 import os
 import logging
 from dotenv import load_dotenv
@@ -11,6 +15,21 @@ load_dotenv()
 logger = logging.getLogger("app.api.endpoints")
 
 router = APIRouter()
+
+
+@router.get('/status/{job_id}')
+def job_status(job_id: str):
+    redis_url = os.environ.get('REDIS_URL')
+    if redis_url:
+        redis_conn = Redis.from_url(redis_url)
+    else:
+        redis_conn = Redis()
+    try:
+        job = Job.fetch(job_id, connection=redis_conn)
+    except Exception:
+        return {'status': 'not_found'}
+
+    return {'id': job.get_id(), 'status': job.get_status(), 'result': job.result}
 
 
 @router.post('/upload_pdf')
@@ -39,13 +58,6 @@ async def upload_pdf(
     # save uploaded file to temp
     with open(tmp_path, 'wb') as f:
         f.write(contents)
-
-    client = SAIAConsoleClient(
-        os.environ.get('GEAI_API_TOKEN'),
-        os.environ.get('ORGANIZATION_ID'),
-        os.environ.get('PROJECT_ID'),
-        os.environ.get('ASSISTANT_ID')
-    )
 
     upload_resp = None
     file_id = None
@@ -97,24 +109,28 @@ async def upload_pdf(
             unique_alias = f"{stem}-{uuid.uuid4().hex[:6]}"
         except Exception:
             unique_alias = os.path.splitext(file.filename or "file")[0] or "file"
-        try:
-            res = await client.send_pdf_and_query(
-                tmp_path,
-                prompt_text,
-                folder=folder or 'test1',
-                alias=alias or unique_alias,
-                assistant_id=assistant,
-            )
-            return res
-        except httpx.HTTPStatusError as he:
-            resp = he.response
-            text = None
-            try:
-                text = resp.text
-            except Exception:
-                text = str(resp)
-            logger.warning(f"[HTTP {resp.status_code}] chat error: {text}")
-            return {"error": f"upstream_http_{resp.status_code}", "status_code": resp.status_code, "detail": text, "upload_response": upload_resp}
+        # enqueue job in Redis to avoid Heroku request timeouts
+        redis_url = os.environ.get('REDIS_URL')
+        if redis_url:
+            redis_conn = Redis.from_url(redis_url)
+        else:
+            redis_conn = Redis()
+        q = Queue(connection=redis_conn)
+
+        with open(tmp_path, 'rb') as f:
+            b = f.read()
+
+        payload = {
+            'file_b64': base64.b64encode(b).decode('ascii'),
+            'filename': file.filename,
+            'prompt': prompt_text,
+            'folder': folder or 'test1',
+            'alias': alias or unique_alias,
+            'assistant': assistant,
+        }
+
+        job = q.enqueue('app.tasks.process_upload', payload)
+        return {'status': 'queued', 'job_id': job.get_id()}
 
     except Exception as e:
         logger.exception("Error en upload_pdf")
@@ -127,3 +143,11 @@ async def upload_pdf(
                 os.remove(tmp_path)
         except Exception:
             logger.warning(f"No se pudo borrar tmp file: {tmp_path}")
+
+
+
+
+
+
+
+
