@@ -111,10 +111,10 @@ async def upload_pdf(
             unique_alias = os.path.splitext(file.filename or "file")[0] or "file"
         # enqueue job in Redis to avoid Heroku request timeouts
         redis_url = os.environ.get('REDIS_URL')
-        if redis_url:
-            redis_conn = Redis.from_url(redis_url)
-        else:
-            redis_conn = Redis()
+        if not redis_url:
+            logger.error('REDIS_URL not configured; cannot enqueue job')
+            return {'error': 'redis_not_configured', 'detail': 'Configure REDIS_URL in environment (Heroku addon)'}
+        redis_conn = Redis.from_url(redis_url)
         q = Queue(connection=redis_conn)
 
         with open(tmp_path, 'rb') as f:

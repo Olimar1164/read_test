@@ -1,26 +1,27 @@
 import os
 import base64
 import logging
-from rq import Queue
+import asyncio
 from redis import Redis
+from rq import Queue
 
 from app.services.ai.saia_console_client import SAIAConsoleClient
 
 logger = logging.getLogger('app.tasks')
 
-# Simple Redis connection (Heroku will provide REDIS_URL)
+# Redis connection will be created by the worker using REDIS_URL
 redis_url = os.environ.get('REDIS_URL')
 if redis_url:
     redis_conn = Redis.from_url(redis_url)
 else:
-    redis_conn = Redis()
+    redis_conn = None
 
-q = Queue(connection=redis_conn)
+q = Queue(connection=redis_conn) if redis_conn else None
 
 
 def process_upload(job_payload):
-    """Worker function: receives a dict with keys: file_b64, filename, prompt, folder, alias, assistant
-    Writes temp file, uses SAIAConsoleClient to send and returns result dict.
+    """Worker function executed inside RQ worker.
+    Job payload contains: file_b64, filename, prompt, folder, alias, assistant
     """
     try:
         tmp_dir = '/tmp/saia_demo'
@@ -38,13 +39,17 @@ def process_upload(job_payload):
             os.environ.get('ASSISTANT_ID')
         )
 
-        res = client.send_pdf_and_query(
-            path,
-            job_payload.get('prompt', ''),
-            folder=job_payload.get('folder', 'test1'),
-            alias=job_payload.get('alias'),
-            assistant_id=job_payload.get('assistant')
-        )
+        # send_pdf_and_query is async; run it in event loop
+        async def _run():
+            return await client.send_pdf_and_query(
+                path,
+                job_payload.get('prompt', ''),
+                folder=job_payload.get('folder', 'test1'),
+                alias=job_payload.get('alias'),
+                assistant_id=job_payload.get('assistant')
+            )
+
+        res = asyncio.run(_run())
 
         # cleanup
         try:
