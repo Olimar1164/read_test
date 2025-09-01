@@ -41,6 +41,16 @@ class AIProcessor:
         }
         logger.info(f"AIProcessor inicializado para proyecto {project_id}")
 
+    # Shared async client (HTTP/2 + connection pooling) per-process to cut handshake/setup costs
+    _shared_client: Optional[httpx.AsyncClient] = None
+
+    @classmethod
+    def _get_client(cls, timeout: int) -> httpx.AsyncClient:
+        if cls._shared_client is None:
+            limits = httpx.Limits(max_connections=100, max_keepalive_connections=20)
+            cls._shared_client = httpx.AsyncClient(http2=True, timeout=timeout, limits=limits)
+        return cls._shared_client
+
     def _prepare_payload(self, assistant_id: str, content: Union[str, Dict[str, Any]], stream: bool = False) -> Dict[str, Any]:
         # Ensure content is a string (SAIA chat expects string content in messages)
         if not isinstance(content, str):
@@ -81,14 +91,13 @@ class AIProcessor:
                     except Exception:
                         headers[str(hk)] = repr(hv)
 
-            async with httpx.AsyncClient() as client:
-                logger.debug(f"[{request_id}] Enviando solicitud a {self.url}")
-                res = await client.post(
-                    self.url,
-                    headers=headers,
-                    json=payload,
-                    timeout=self.request_timeout,
-                )
+            client = self._get_client(self.request_timeout)
+            logger.debug(f"[{request_id}] Enviando solicitud a {self.url}")
+            res = await client.post(
+                self.url,
+                headers=headers,
+                json=payload,
+            )
             res.raise_for_status()
             data = res.json()
             # Robust extraction of assistant textual content from common response shapes
@@ -193,14 +202,13 @@ class AIProcessor:
         logger.info(f"[{request_id}] Iniciando streaming para assistant_id={assistant_id}")
         payload = self._prepare_payload(assistant_id, content, stream=True)
         try:
-            async with httpx.AsyncClient() as client:
-                async with client.stream(
-                    "POST",
-                    self.url,
-                    headers=self.headers,
-                    json=payload,
-                    timeout=self.request_timeout
-                ) as response:
+            client = self._get_client(self.request_timeout)
+            async with client.stream(
+                "POST",
+                self.url,
+                headers=self.headers,
+                json=payload,
+            ) as response:
                     response.raise_for_status()
                     async for line in response.aiter_lines():
                         if line.startswith('data: '):

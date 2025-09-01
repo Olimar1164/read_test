@@ -37,6 +37,15 @@ class SAIAConsoleClient:
         self.processor = AIProcessor(
             api_token, organization_id, project_id, base_url=f"{self.base_url}/chat", request_timeout=timeout
         )
+        # Simple in-memory caches per-process
+        self._client: Optional[httpx.AsyncClient] = None
+        self._upload_cache: Dict[str, Dict] = {}
+
+    def _get_client(self) -> httpx.AsyncClient:
+        if self._client is None:
+            limits = httpx.Limits(max_connections=100, max_keepalive_connections=20)
+            self._client = httpx.AsyncClient(http2=True, timeout=self.timeout, limits=limits)
+        return self._client
 
     @staticmethod
     def _sanitize_header_value(v: Optional[str]) -> Optional[str]:
@@ -81,37 +90,54 @@ class SAIAConsoleClient:
         headers["fileName"] = self._sanitize_header_value(alias_used)
         headers["folder"] = self._sanitize_header_value(folder or "test1")
 
+        # Cache: if we already uploaded an identical file (by sha256), skip re-upload
+        cache_key = f"{alias_used}:{file_hash}"
+        cached = self._upload_cache.get(cache_key)
+        if cached:
+            logger.debug("Using cached upload result for %s", cache_key)
+            return dict(cached)
+
         try:
-            async with httpx.AsyncClient(timeout=self.timeout) as client:
-                files = {"file": (multipart_filename, data, content_type)}
-                resp = await client.post(url, headers=headers, files=files)
-                status = resp.status_code
-                text = resp.text
-                try:
-                    j = resp.json()
-                except Exception:
-                    j = None
+            client = self._get_client()
+            files = {"file": (multipart_filename, data, content_type)}
+            resp = await client.post(url, headers=headers, files=files)
+            status = resp.status_code
+            text = resp.text
+            try:
+                j = resp.json()
+            except Exception:
+                j = None
 
-                result: Dict[str, Any] = {
-                    "status_code": status,
-                    "headers": dict(resp.headers),
-                    "file_name_used": multipart_filename,
-                    "file_alias_used": alias_used,
-                    "file_size": file_size,
-                    "file_sha256": file_hash,
-                }
-                if j is not None:
-                    if isinstance(j, dict):
-                        result.update(j)
-                        result.setdefault("file_name_used", multipart_filename)
-                    else:
-                        result["json"] = j
+            result: Dict[str, Any] = {
+                "status_code": status,
+                "headers": dict(resp.headers),
+                "file_name_used": multipart_filename,
+                "file_alias_used": alias_used,
+                "file_size": file_size,
+                "file_sha256": file_hash,
+            }
+            if j is not None:
+                if isinstance(j, dict):
+                    result.update(j)
+                    result.setdefault("file_name_used", multipart_filename)
                 else:
-                    result["text"] = text
+                    result["json"] = j
+            else:
+                result["text"] = text
 
-                if status >= 400:
-                    logger.warning("Upload returned status %s: %s", status, text[:400])
-                return result
+            if status >= 400:
+                logger.warning("Upload returned status %s: %s", status, text[:400])
+            else:
+                # store success in cache to avoid repeating
+                try:
+                    self._upload_cache[cache_key] = dict(result)
+                    # Bound the cache size roughly
+                    if len(self._upload_cache) > 256:
+                        # drop an arbitrary first item
+                        self._upload_cache.pop(next(iter(self._upload_cache)))
+                except Exception:
+                    pass
+            return result
         except UnicodeEncodeError as ue:
             logger.warning("UnicodeEncodeError when sending headers, sanitized fileName: %s", ue)
             headers["fileName"] = self._sanitize_header_value(multipart_filename)
@@ -171,42 +197,25 @@ class SAIAConsoleClient:
             if not file_id and (fid or dfid):
                 file_id = fid or dfid
 
-        # Poll dataFileUrl to mitigate ingestion delay
-        if isinstance(up, dict):
-            dfu = up.get("dataFileUrl") or up.get("data_file_url") or up.get("datafileurl")
-            if dfu and isinstance(dfu, str):
-                url_to_check = dfu if dfu.startswith("http") else f"{self.base_url.rstrip('/')}/{dfu.lstrip('/')}"
-                try:
-                    import asyncio
-                    import time
-                    start = time.time()
-                    poll_timeout = 10.0
-                    poll_delay = 0.5
-                    async with httpx.AsyncClient(timeout=self.timeout) as client:
-                        while True:
-                            try:
-                                r = await client.get(url_to_check, headers=self.default_headers)
-                                if r.status_code == 200:
-                                    break
-                            except Exception:
-                                pass
-                            if time.time() - start > poll_timeout:
-                                break
-                            await asyncio.sleep(poll_delay)
-                            poll_delay = min(poll_delay * 2, 2.0)
-                except Exception:
-                    pass
-
-        # Call chat with retries on 8024
-        max_retries = 6
-        delay = 0.5
+        # Skip pre-ingestion polling: attempt chat immediately; handle 8024 with quick retries
+        max_retries = 5
+        delay = 0.2
         for attempt in range(1, max_retries + 1):
-            resp = await self.chat_with_file(prompt, file_id, stream=stream, assistant_id=assistant_id, file_name_used=file_name_used)
-            if isinstance(resp, dict) and (resp.get("error") == "document_no_pages" or str(resp.get("code") or resp.get("status_code") or "") == "8024"):
+            resp = await self.chat_with_file(
+                prompt,
+                file_id,
+                stream=stream,
+                assistant_id=assistant_id,
+                file_name_used=file_name_used,
+            )
+            if isinstance(resp, dict) and (
+                resp.get("error") == "document_no_pages"
+                or str(resp.get("code") or resp.get("status_code") or "") == "8024"
+            ):
                 if attempt == max_retries:
                     return resp
                 await __import__("asyncio").sleep(delay)
-                delay *= 2
+                delay *= 1.7
                 continue
             return resp
         return {"error": "chat_failed", "detail": "Retries exhausted"}
