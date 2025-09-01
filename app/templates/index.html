@@ -1,0 +1,382 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8" />
+    <title>Demo Metrocapital — Lectura de Archivos</title>
+    <style>
+        :root {
+            /* dark theme defaults */
+            --bg: #0b1220;
+            --bg-2: #0f172a;
+            --card: linear-gradient(180deg, rgba(17,24,39,0.6), rgba(15,22,40,0.6));
+            --card-solid: #0f1628;
+            --text: #e5e7eb;
+            --muted: #93a4bf;
+            --primary: #2563eb;
+            --primary-600: #1d4ed8;
+            --accent: #14b8a6;
+            --card-border: rgba(148,163,184,0.16);
+            --hero-accent: linear-gradient(135deg, rgba(29,78,216,0.25), rgba(20,184,166,0.18));
+        }
+        html, body { height: 100%; }
+        body {
+            font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Ubuntu, Cantarell, Noto Sans, Helvetica Neue, Arial, "Apple Color Emoji", "Segoe UI Emoji";
+            background: radial-gradient(1200px 600px at 20% -10%, #0c1734 0%, var(--bg) 60%) no-repeat fixed;
+            color: var(--text);
+            margin: 0;
+        }
+        .hero {
+            background: var(--hero-accent);
+            border-bottom: 1px solid var(--card-border);
+            padding: 36px 18px 50px;
+            text-align: center;
+        }
+        .brand {
+            display: inline-flex; align-items: center; gap: 10px; margin-bottom: 10px;
+            color: var(--text); letter-spacing: 0.08em; text-transform: uppercase; font-weight: 700;
+        }
+        .brand .dot { width: 10px; height: 10px; border-radius: 50%; background: linear-gradient(45deg, #f43f5e, #f59e0b, #22c55e); display:inline-block }
+    .hero h1 { margin: 8px 0 6px; font-size: 26px; color: var(--text) }
+    .hero p { margin: 0; color: var(--muted) }
+        .wrap { max-width: 980px; margin: -28px auto 28px; padding: 0 16px; }
+        .card {
+            background: var(--card);
+            backdrop-filter: blur(6px);
+            border: 1px solid var(--card-border);
+            border-radius: 12px;
+            padding: 20px 22px;
+            box-shadow: 0 12px 32px rgba(2,6,23,0.28);
+        }
+    h2 { margin: 0 0 10px; font-size: 18px; color: var(--text) }
+        p.lead { margin: 0 0 16px; color: var(--muted) }
+        .row { display:flex; gap:10px; align-items:center; flex-wrap: wrap }
+    input[type=file] { padding:10px; color: var(--text); background: var(--card-solid); border:1px solid rgba(148,163,184,0.12); border-radius:6px }
+        button { padding:10px 14px; background: var(--primary); color:#fff; border:none; border-radius:8px; cursor:pointer; box-shadow: 0 6px 18px rgba(37,99,235,0.08) }
+        button:hover { background: var(--primary-600); }
+        /* secondary buttons */
+        button.secondary { background: transparent; border:1px solid rgba(148,163,184,0.08); color:var(--text); }
+        button.secondary:hover { background: rgba(148,163,184,0.03); }
+    /* bottom reset button styles */
+    #resetBtnBottom { background: var(--card-solid); color: var(--text); border: 1px solid rgba(0,0,0,0.06); }
+    #resetBtnBottom:hover { filter:brightness(0.95) }
+        pre#result {
+            margin-top:16px; background: var(--card-solid); color: var(--text); padding:14px; border-radius:10px; max-height:460px; overflow:auto;
+            border:1px solid var(--card-border);
+        }
+        .muted { color:var(--muted); font-size:13px }
+        .small { font-size:13px }
+        footer { text-align:center; color: var(--muted); font-size:12px; margin: 10px 0 20px; }
+        /* Loading overlay */
+        #loading {
+            position: fixed; inset: 0; background: rgba(7,12,23,0.75);
+            display: none; align-items: center; justify-content: center; z-index: 9999;
+        }
+        .loading-box {
+            background: var(--card-solid); border: 1px solid rgba(148,163,184,0.18); padding: 18px 20px; border-radius: 12px; text-align: center; min-width: 240px;
+            box-shadow: 0 10px 28px rgba(0,0,0,0.35);
+        }
+        .spinner { width: 44px; height: 44px; border: 4px solid #334155; border-top-color: var(--primary); border-radius:50%; margin: 0 auto 12px; animation: spin 0.9s linear infinite }
+        .loading-title { font-weight:600; color: var(--text); }
+        .loading-muted { margin-top:6px; color: var(--muted); }
+        @keyframes spin { to { transform: rotate(360deg) } }
+    </style>
+    <style>
+        /* Light theme variables */
+        body.light {
+            --bg: #f1f5f9;
+            --bg-2: #f7f8fb;
+            --card: #ffffff;
+            --card-solid: #ffffff;
+            --text: #0b1220;
+            --muted: #6b7280;
+            --primary: #2563eb;
+            --primary-600: #1d4ed8;
+            --accent: #0ea5a4;
+            --card-border: rgba(2,6,23,0.06);
+            background: linear-gradient(1200px 600px at 20% -10%, var(--bg) 0%, var(--bg-2) 60%) no-repeat fixed;
+            color: var(--text);
+        }
+        body.light .hero { color: var(--text); }
+        body.light .card { background: var(--card); border: 1px solid var(--card-border); box-shadow: 0 8px 20px rgba(2,6,23,0.06); color: var(--text) }
+        body.light .muted { color: var(--muted) }
+        body.light pre#result { background: var(--card); color: var(--text); border:1px solid var(--card-border) }
+        body.light input[type=file] { background: var(--card); color: var(--text) }
+        body.light #submitBtn { color: #fff }
+        body.light #themeToggle { background: transparent; border:1px solid var(--card-border); color:var(--text) }
+        body.light #resetBtnBottom { background: transparent; border:1px solid var(--card-border); color:var(--text) }
+    </style>
+</head>
+<body>
+    <div class="hero">
+        <div class="brand"><span class="dot"></span> Metrocapital — Demo</div>
+        <h1>Lectura de archivos</h1>
+        <p>Sube un documento y obtén un resumen inmediato. Interfaz de demostración Metrocapital.</p>
+    </div>
+
+    <div class="wrap">
+    <div class="card">
+        <h2>Sube tu archivo</h2>
+        <p class="lead">Tipos soportados: PDF, PNG, JPG, CSV, TXT (máx. 800 KB).</p>
+
+        <form id="pdfForm" enctype="multipart/form-data">
+            <div class="row">
+                <input id="fileInput" type="file" name="file" accept="application/pdf,image/png,image/jpeg,text/csv,text/plain" required />
+                <!-- assistant fijo para demo (oculto) -->
+                <input type="hidden" name="assistant" value="test_read" />
+                <div style="flex:1"></div>
+                <button id="submitBtn" type="submit">Subir y preguntar</button>
+            </div>
+        </form>
+
+    <div id="loading">
+        <div class="loading-box">
+            <div class="spinner"></div>
+            <div class="loading-title">Procesando…</div>
+            <div class="loading-muted">Subiendo y analizando el archivo</div>
+        </div>
+    </div>
+    <div id="status" class="status" style="margin-top:12px; display:none;
+                font-weight:600"></div>
+    <!-- Mensaje principal (texto formateado) will be shown in the dark result box to keep UI compact -->
+    <pre id="message" class="message" style="margin-top:12px; display:none; max-height:360px; overflow:auto; border:1px solid var(--card-border); padding:12px; border-radius:6px"></pre>
+    <!-- JSON completo / debug (also used as the main visible assistant output when available) -->
+    <pre id="result" style="margin-top:12px;">Respuesta aquí...</pre>
+    <div class="controls" style="display:flex; gap:8px; margin-top:10px; justify-content:flex-end;">
+        <button id="themeToggle" type="button" class="secondary">Modo claro</button>
+        <button id="resetBtnBottom" type="button" class="secondary">Reiniciar</button>
+    </div>
+    </div>
+    <footer>© Metrocapital Technology Company — Demo interna</footer>
+    </div>
+
+    <script>
+    const form = document.getElementById('pdfForm');
+    const result = document.getElementById('result');
+    const loading = document.getElementById('loading');
+        const submitBtn = document.getElementById('submitBtn');
+        // top reset removed; use bottom reset only
+        const resetBtnBottom = document.getElementById('resetBtnBottom');
+        const themeToggle = document.getElementById('themeToggle');
+        const fileInput = document.getElementById('fileInput');
+
+        function sortKeys(obj) {
+            if (Array.isArray(obj)) return obj.map(sortKeys);
+            if (obj && typeof obj === 'object') {
+                return Object.keys(obj).sort().reduce((acc, k) => {
+                    acc[k] = sortKeys(obj[k]);
+                    return acc;
+                }, {});
+            }
+            return obj;
+        }
+
+        form.onsubmit = async (e) => {
+            e.preventDefault();
+            result.textContent = '';
+            document.getElementById('message').style.display = 'none';
+            document.getElementById('message').textContent = '';
+            const statusEl = document.getElementById('status');
+            statusEl.style.display = 'none';
+            statusEl.textContent = '';
+            loading.style.display = 'flex';
+            submitBtn.disabled = true;
+            resetBtnBottom.disabled = true;
+
+            const fd = new FormData(form);
+            // client-side validation: size and extension
+            const file = fileInput.files[0];
+            if (!file) {
+                statusEl.style.display = 'block';
+                statusEl.textContent = 'Selecciona un archivo antes de enviar.';
+                loading.style.display = 'none';
+                submitBtn.disabled = false;
+                resetBtn.disabled = false;
+                return;
+            }
+            const maxBytes = 800 * 1024; // 800 KB
+            if (file.size > maxBytes) {
+                statusEl.style.display = 'block';
+                statusEl.textContent = `Archivo demasiado grande (${Math.round(file.size/1024)} KB). Tamaño máximo: 800 KB.`;
+                loading.style.display = 'none';
+                submitBtn.disabled = false;
+                resetBtn.disabled = false;
+                return;
+            }
+            const allowed = ['application/pdf','image/png','image/jpeg','text/csv','text/plain'];
+            if (!allowed.includes(file.type)) {
+                // check extension as fallback
+                const ext = (file.name || '').split('.').pop().toLowerCase();
+                const allowedExt = ['pdf','png','jpg','jpeg','csv','txt'];
+                if (!allowedExt.includes(ext)) {
+                    statusEl.style.display = 'block';
+                    statusEl.textContent = 'Tipo de archivo no soportado. Usa pdf, png, jpg o csv.';
+                    loading.style.display = 'none';
+                    submitBtn.disabled = false;
+                    resetBtn.disabled = false;
+                    return;
+                }
+            }
+            try {
+                const r = await fetch('/upload_pdf', { method: 'POST', body: fd });
+                const txt = await r.text();
+                try {
+                    const parsed = JSON.parse(txt);
+
+                    // helper: try to extract the assistant textual output from common fields
+                    function extractText(obj) {
+                        if (!obj) return null;
+                        if (typeof obj === 'string') return obj;
+                        const direct = ['message', 'content', 'text', 'output', 'answer', 'result'];
+                        for (const k of direct) {
+                            if (obj[k] && typeof obj[k] === 'string') return obj[k];
+                        }
+                        // common chat shape: { choices: [{ message: { content: '...' } }] }
+                        if (obj.choices && Array.isArray(obj.choices) && obj.choices.length) {
+                            const c = obj.choices[0];
+                            if (c.message && (c.message.content || c.message.text)) return c.message.content || c.message.text;
+                            if (typeof c === 'string') return c;
+                        }
+                        // search recursively for the first reasonably long string (heuristic)
+                        function findString(o) {
+                            if (typeof o === 'string') return o;
+                            if (Array.isArray(o)) {
+                                for (const v of o) {
+                                    const r = findString(v);
+                                    if (r && r.length > 20) return r;
+                                }
+                                return null;
+                            }
+                            if (o && typeof o === 'object') {
+                                for (const k in o) {
+                                    const r = findString(o[k]);
+                                    if (r && r.length > 20) return r;
+                                }
+                            }
+                            return null;
+                        }
+                        return findString(obj);
+                    }
+
+                    const extracted = extractText(parsed);
+                    // We show the assistant text inside the dark `#result` box so the UI is compact and consistent.
+                    const messageEl = document.getElementById('message');
+                    if (extracted) {
+                        // Put the cleaned assistant text into the result box (dark background) and hide debug.
+                        result.style.display = 'block';
+                        // adapt to current theme
+                        const isLight = document.body.classList.contains('light');
+                        result.style.background = isLight ? '#ffffff' : '#0b1220';
+                        result.style.color = isLight ? '#0b1220' : '#e6eef8';
+                        result.textContent = extracted;
+                        // keep the plain white message element hidden (it's kept for backward compatibility)
+                        messageEl.style.display = 'none';
+                        messageEl.textContent = '';
+                    } else {
+                        messageEl.style.display = 'none';
+                        messageEl.textContent = '';
+                    }
+
+                    // show JSON debug below (remove duplication if message was top-level)
+                    let debugObj = parsed;
+                    if (extracted && parsed && typeof parsed === 'object') {
+                        // try to remove common fields that duplicate the message to keep JSON compact
+                        const clone = JSON.parse(JSON.stringify(parsed));
+                        ['message','content','text','output','answer','result'].forEach(k => delete clone[k]);
+                        if (clone.choices && Array.isArray(clone.choices) && clone.choices.length) {
+                            const first = clone.choices[0];
+                            if (first.message && (first.message.content || first.message.text)) {
+                                delete clone.choices;
+                            }
+                        }
+                        debugObj = clone;
+                    }
+
+                    // Remove verbose debug keys we don't want to show in the UI
+                    if (debugObj && typeof debugObj === 'object') {
+                        // remove any internal diagnostic keys (e.g., sent_headers, sent_payload)
+                        for (const k of Object.keys(debugObj)) {
+                            if (k.startsWith('sent_')) delete debugObj[k];
+                        }
+                    }
+
+                    // If there's no extracted assistant text, show the JSON debug output.
+                    if (!extracted) {
+                        result.style.display = 'block';
+                        const isLight2 = document.body.classList.contains('light');
+                        result.style.background = isLight2 ? '#ffffff' : '#0b1220';
+                        result.style.color = isLight2 ? '#0b1220' : '#e6eef8';
+                        if (debugObj && debugObj.status_code && debugObj.detail) {
+                            result.textContent = JSON.stringify({status: debugObj.status_code, detail: debugObj.detail, upload_response: debugObj.upload_response}, null, 2);
+                        } else if (debugObj && debugObj.error && debugObj.detail) {
+                            result.textContent = JSON.stringify(debugObj, null, 2);
+                        } else {
+                            const sorted = sortKeys(debugObj);
+                            result.textContent = JSON.stringify(sorted, null, 2);
+                        }
+                    }
+
+                    // Always remove internal diagnostic keys from the visible JSON to keep output clean
+                    try {
+                        const displayText = result.textContent;
+                        const maybe = JSON.parse(displayText);
+                        if (maybe && typeof maybe === 'object') {
+                            for (const k of Object.keys(maybe)) {
+                                if (k.startsWith('sent_')) delete maybe[k];
+                            }
+                            result.textContent = JSON.stringify(maybe, null, 2);
+                        }
+                    } catch (e) {
+                        // not JSON, leave as-is
+                    }
+                } catch (err) {
+                    result.textContent = txt;
+                }
+            } catch (err) {
+                // show network or other errors in status box
+                const statusEl = document.getElementById('status');
+                statusEl.style.display = 'block';
+                statusEl.textContent = String(err);
+                result.textContent = '';
+            } finally {
+                loading.style.display = 'none';
+                submitBtn.disabled = false;
+                resetBtnBottom.disabled = false;
+            }
+        }
+            // reset handler (bottom button)
+            resetBtnBottom.onclick = () => {
+                form.reset();
+                result.textContent = 'Respuesta aquí...';
+                const statusEl = document.getElementById('status');
+                statusEl.style.display = 'none';
+                statusEl.textContent = '';
+                const messageEl = document.getElementById('message');
+                messageEl.style.display = 'none';
+                messageEl.textContent = '';
+                loading.style.display = 'none';
+                // ensure bottom reset is enabled
+                resetBtnBottom.disabled = false;
+            };
+
+            // Theme toggle (light/dark) with persistence
+            (function initTheme(){
+                try {
+                    const pref = localStorage.getItem('theme') || 'dark';
+                    if (pref === 'light') document.body.classList.add('light');
+                    themeToggle.textContent = document.body.classList.contains('light') ? 'Modo oscuro' : 'Modo claro';
+                } catch {}
+            })();
+            themeToggle.onclick = () => {
+                document.body.classList.toggle('light');
+                const isLight = document.body.classList.contains('light');
+                themeToggle.textContent = isLight ? 'Modo oscuro' : 'Modo claro';
+                try { localStorage.setItem('theme', isLight ? 'light' : 'dark'); } catch {}
+                // restyle current result box to match theme
+                if (result.textContent && result.textContent.trim()) {
+                    result.style.background = isLight ? '#ffffff' : '#0b1220';
+                    result.style.color = isLight ? '#0b1220' : '#e6eef8';
+                }
+            };
+    </script>
+</body>
+</html>

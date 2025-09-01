@@ -1,0 +1,10 @@
+fastapi
+uvicorn
+httpx
+python-multipart
+python-dotenv
+jinja2
+motor
+pytest
+pytest-asyncio
+respx
