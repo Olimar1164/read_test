@@ -170,6 +170,21 @@
             return obj;
         }
 
+        async function pollStatus(jobId, maxMs = 120000) {
+            const started = Date.now();
+            let delay = 800;
+            while (Date.now() - started < maxMs) {
+                try {
+                    const r = await fetch(`/status/${jobId}`);
+                    const j = await r.json();
+                    if (j && (j.status === 'finished' || j.status === 'failed')) return j;
+                } catch {}
+                await new Promise(res => setTimeout(res, delay));
+                delay = Math.min(delay * 1.5, 5000);
+            }
+            return { status: 'timeout' };
+        }
+
         form.onsubmit = async (e) => {
             e.preventDefault();
             result.textContent = '';
@@ -219,8 +234,22 @@
             try {
                 const r = await fetch('/upload_pdf', { method: 'POST', body: fd });
                 const txt = await r.text();
+                let parsed;
+                try { parsed = JSON.parse(txt); } catch {}
+                if (parsed && parsed.status === 'queued' && parsed.job_id) {
+                    const statusEl = document.getElementById('status');
+                    statusEl.style.display = 'block';
+                    statusEl.textContent = 'Procesando en background…';
+                    const j = await pollStatus(parsed.job_id, 180000);
+                    if (j.status === 'finished' && j.result) {
+                        parsed = j.result;
+                    } else if (j.status === 'failed') {
+                        parsed = { error: 'failed', detail: j.error };
+                    } else {
+                        parsed = { error: 'timeout', detail: 'El procesamiento tardó demasiado (3 min).' };
+                    }
+                }
                 try {
-                    const parsed = JSON.parse(txt);
 
                     // helper: try to extract the assistant textual output from common fields
                     function extractText(obj) {
