@@ -3,9 +3,6 @@ uvicorn[standard]
 httpx
 python-multipart
 python-dotenv
-jq
-redis
-rq
 jinja2
 motor
 pytest

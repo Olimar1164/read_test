@@ -1,12 +1,10 @@
-from fastapi import APIRouter, UploadFile, File, Form
+from fastapi import APIRouter, UploadFile, File, Form, BackgroundTasks
 import base64
-from redis import Redis
-from rq import Queue
-from rq.job import Job
 import os
 import logging
 from dotenv import load_dotenv
 from app.services.ai.saia_console_client import SAIAConsoleClient
+from app.background import job_store
 import httpx
 
 # No DB persistence for demo: uploads go directly to SAIA files API
@@ -19,17 +17,10 @@ router = APIRouter()
 
 @router.get('/status/{job_id}')
 def job_status(job_id: str):
-    redis_url = os.environ.get('REDIS_URL')
-    if redis_url:
-        redis_conn = Redis.from_url(redis_url)
-    else:
-        redis_conn = Redis()
-    try:
-        job = Job.fetch(job_id, connection=redis_conn)
-    except Exception:
+    j = job_store.get(job_id)
+    if not j:
         return {'status': 'not_found'}
-
-    return {'id': job.get_id(), 'status': job.get_status(), 'result': job.result}
+    return {'id': job_id, 'status': j['status'], 'result': j['result'], 'error': j['error']}
 
 
 @router.post('/upload_pdf')
@@ -40,6 +31,7 @@ async def upload_pdf(
     assistant: str = Form(None),
     model: str = Form(None),
     alias: str = Form(None),
+    background_tasks: BackgroundTasks = None,
 ):
     # server-side validation: limit size and allowed extensions
     allowed_ext = {'.pdf', '.png', '.jpg', '.jpeg', '.csv', '.txt'}
@@ -109,17 +101,9 @@ async def upload_pdf(
             unique_alias = f"{stem}-{uuid.uuid4().hex[:6]}"
         except Exception:
             unique_alias = os.path.splitext(file.filename or "file")[0] or "file"
-        # enqueue job in Redis to avoid Heroku request timeouts
-        redis_url = os.environ.get('REDIS_URL')
-        if not redis_url:
-            logger.error('REDIS_URL not configured; cannot enqueue job')
-            return {'error': 'redis_not_configured', 'detail': 'Configure REDIS_URL in environment (Heroku addon)'}
-        redis_conn = Redis.from_url(redis_url)
-        q = Queue(connection=redis_conn)
-
+        # In-process background task to avoid Heroku 30s timeouts without Redis
         with open(tmp_path, 'rb') as f:
             b = f.read()
-
         payload = {
             'file_b64': base64.b64encode(b).decode('ascii'),
             'filename': file.filename,
@@ -129,8 +113,44 @@ async def upload_pdf(
             'assistant': assistant,
         }
 
-        job = q.enqueue('app.tasks.process_upload', payload)
-        return {'status': 'queued', 'job_id': job.get_id()}
+        job_id = job_store.create(payload)
+
+        async def _worker():
+            try:
+                client = SAIAConsoleClient(
+                    os.environ.get('GEAI_API_TOKEN'),
+                    os.environ.get('ORGANIZATION_ID'),
+                    os.environ.get('PROJECT_ID'),
+                    os.environ.get('ASSISTANT_ID')
+                )
+                import base64 as _b64, os as _os
+                tmp_dir = '/tmp/saia_demo'
+                _os.makedirs(tmp_dir, exist_ok=True)
+                p = _os.path.join(tmp_dir, payload['filename'])
+                with open(p, 'wb') as fw:
+                    fw.write(_b64.b64decode(payload['file_b64']))
+                res = await client.send_pdf_and_query(
+                    p,
+                    payload['prompt'],
+                    folder=payload['folder'],
+                    alias=payload['alias'],
+                    assistant_id=payload['assistant']
+                )
+                try:
+                    _os.remove(p)
+                except Exception:
+                    pass
+                job_store.set_result(job_id, res)
+            except Exception as e:
+                job_store.set_error(job_id, str(e))
+
+        if background_tasks is not None:
+            background_tasks.add_task(_worker)
+        else:
+            import asyncio
+            asyncio.create_task(_worker())
+
+        return {'status': 'queued', 'job_id': job_id}
 
     except Exception as e:
         logger.exception("Error en upload_pdf")
