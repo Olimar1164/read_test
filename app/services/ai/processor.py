@@ -48,7 +48,8 @@ class AIProcessor:
     def _get_client(cls, timeout: int) -> httpx.AsyncClient:
         if cls._shared_client is None:
             limits = httpx.Limits(max_connections=100, max_keepalive_connections=20)
-            cls._shared_client = httpx.AsyncClient(http2=True, timeout=timeout, limits=limits)
+            # Use HTTP/1.1 by default on Heroku to avoid optional 'h2' dependency
+            cls._shared_client = httpx.AsyncClient(http2=False, timeout=timeout, limits=limits)
         return cls._shared_client
 
     def _prepare_payload(self, assistant_id: str, content: Union[str, Dict[str, Any]], stream: bool = False) -> Dict[str, Any]:

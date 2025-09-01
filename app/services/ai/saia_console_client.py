@@ -44,7 +44,8 @@ class SAIAConsoleClient:
     def _get_client(self) -> httpx.AsyncClient:
         if self._client is None:
             limits = httpx.Limits(max_connections=100, max_keepalive_connections=20)
-            self._client = httpx.AsyncClient(http2=True, timeout=self.timeout, limits=limits)
+            # Use HTTP/1.1 by default to avoid requiring the 'h2' package on Heroku
+            self._client = httpx.AsyncClient(http2=False, timeout=self.timeout, limits=limits)
         return self._client
 
     @staticmethod
