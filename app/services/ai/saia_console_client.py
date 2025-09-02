@@ -75,8 +75,21 @@ class SAIAConsoleClient:
         multipart_filename = orig_name
 
         try:
-            with open(file_path, "rb") as fh:
-                data = fh.read()
+            # prefer aiofiles when available (module-level HAVE_AIOFILES expected)
+            try:
+                from app.api.endpoints import HAVE_AIOFILES
+            except Exception:
+                HAVE_AIOFILES = False
+            if HAVE_AIOFILES:
+                try:
+                    async with __import__('aiofiles').open(file_path, 'rb') as fh:
+                        data = await fh.read()
+                except Exception:
+                    with open(file_path, "rb") as fh:
+                        data = fh.read()
+            else:
+                with open(file_path, "rb") as fh:
+                    data = fh.read()
         except Exception as e:
             logger.exception("Failed reading file for upload: %s", file_path)
             return {"error": "file_read_failed", "detail": str(e)}
@@ -156,14 +169,14 @@ class SAIAConsoleClient:
         extra_headers = {"fileName": file_name_used} if file_name_used else None
         try:
             try:
-                sent_payload = self.processor._prepare_payload(aid, content, stream)
+                sent_payload = self.processor._prepare_payload(aid, content, stream=stream)
             except Exception:
                 sent_payload = {"model": f"saia:assistant:{aid}", "messages": [{"role": "user", "content": content}], "stream": stream}
             sent_headers = dict(self.processor.headers)
             if extra_headers:
                 for k, v in extra_headers.items():
                     sent_headers[str(k)] = str(v)
-            resp = await self.processor.process(aid, content, extra_headers=extra_headers)
+            resp = await self.processor.process(aid, content, extra_headers=extra_headers, stream=stream)
             if isinstance(resp, dict):
                 resp.setdefault("sent_payload", sent_payload)
                 sh = dict(sent_headers)
@@ -220,3 +233,16 @@ class SAIAConsoleClient:
                 continue
             return resp
         return {"error": "chat_failed", "detail": "Retries exhausted"}
+
+    async def aclose(self) -> None:
+        """Close the instance httpx client if created."""
+        try:
+            if hasattr(self, '_client') and self._client is not None:
+                try:
+                    await self._client.aclose()
+                except Exception:
+                    pass
+                self._client = None
+        except Exception:
+            pass
+
