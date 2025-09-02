@@ -39,7 +39,11 @@ class AIProcessor:
             'organizationId': self.organization_id,
             'projectId': self.project_id
         }
-        logger.info(f"AIProcessor inicializado para proyecto {project_id}")
+        # log initialization at debug level
+        try:
+            logger.debug(f"AIProcessor inicializado para proyecto {self.project_id}")
+        except Exception:
+            pass
 
     # Shared async client (HTTP/2 + connection pooling) per-process to cut handshake/setup costs
     _shared_client: Optional[httpx.AsyncClient] = None
@@ -51,6 +55,15 @@ class AIProcessor:
             # Use HTTP/1.1 by default on Heroku to avoid optional 'h2' dependency
             cls._shared_client = httpx.AsyncClient(http2=False, timeout=timeout, limits=limits)
         return cls._shared_client
+
+    @classmethod
+    async def close_client(cls) -> None:
+        if cls._shared_client is not None:
+            try:
+                await cls._shared_client.aclose()
+            except Exception:
+                pass
+            cls._shared_client = None
 
     def _prepare_payload(self, assistant_id: str, content: Union[str, Dict[str, Any]], stream: bool = False) -> Dict[str, Any]:
         # Ensure content is a string (SAIA chat expects string content in messages)
@@ -76,12 +89,12 @@ class AIProcessor:
             logger.debug("Respuesta no es JSON válido, devolviendo como mensaje de texto")
             return {'message': response_text}
 
-    async def process(self, assistant_id: str, content: Any, extra_headers: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
+    async def process(self, assistant_id: str, content: Any, extra_headers: Optional[Dict[str, str]] = None, stream: bool = False) -> Dict[str, Any]:
         start_time = __import__('time').time()
         request_id = __import__('uuid').uuid4().hex[:8]
-        logger.info(f"[{request_id}] Procesando solicitud para assistant_id={assistant_id}")
+        logger.debug(f"[{request_id}] Procesando solicitud para assistant_id={assistant_id}")
         try:
-            payload = self._prepare_payload(assistant_id, content)
+            payload = self._prepare_payload(assistant_id, content, stream=stream)
             # Merge base headers with any extra headers for this call (e.g., fileName)
             headers = dict(self.headers)
             if extra_headers:
@@ -151,7 +164,7 @@ class AIProcessor:
                 # Defensive: if response shape is unexpected, return the raw data instead of raising
                 result = data
             elapsed = __import__('time').time() - start_time
-            logger.info(f"[{request_id}] Procesamiento completado en {elapsed:.2f}s")
+            logger.debug(f"[{request_id}] Procesamiento completado en {elapsed:.2f}s")
             return result
         except HTTPStatusError as e:
             # include upstream response body for debugging
