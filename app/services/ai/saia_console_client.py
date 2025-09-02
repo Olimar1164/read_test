@@ -40,6 +40,14 @@ class SAIAConsoleClient:
         # Simple in-memory caches per-process
         self._client: Optional[httpx.AsyncClient] = None
         self._upload_cache: Dict[str, Dict] = {}
+        # simple runtime counters for observability (in-process)
+        self.metrics = {
+            'upload_cache_hits': 0,
+            'upload_cache_misses': 0,
+            'fast_path_hits': 0,
+            'fast_path_misses': 0,
+            'fallback_disk_used': 0,
+        }
 
     def _get_client(self) -> httpx.AsyncClient:
         if self._client is None:
@@ -109,7 +117,16 @@ class SAIAConsoleClient:
         cached = self._upload_cache.get(cache_key)
         if cached:
             logger.debug("Using cached upload result for %s", cache_key)
+            try:
+                self.metrics['upload_cache_hits'] += 1
+            except Exception:
+                pass
             return dict(cached)
+        else:
+            try:
+                self.metrics['upload_cache_misses'] += 1
+            except Exception:
+                pass
 
         try:
             client = self._get_client()
@@ -187,6 +204,108 @@ class SAIAConsoleClient:
         except Exception as e:
             logger.warning("Chat exception: %s", e)
             return {"error": "chat_failed", "detail": str(e)}
+
+    async def upload_bytes(self, data: bytes, file_name: str, folder: Optional[str] = None, alias: Optional[str] = None) -> Dict[str, Any]:
+        """Upload in-memory bytes to SAIA files endpoint (same semantics as upload_file)."""
+        # create a temporary path-like name for content-type guess
+        fake_path = file_name or "file"
+        file_size = len(data)
+        file_hash = self._sha256(data)
+        content_type = self._guess_content_type(fake_path)
+
+        headers = dict(self.default_headers)
+        headers["Accept"] = "application/json"
+        alias_used = alias or os.path.splitext(fake_path)[0]
+        headers["fileName"] = self._sanitize_header_value(alias_used)
+        headers["folder"] = self._sanitize_header_value(folder or "test1")
+
+        cache_key = f"{alias_used}:{file_hash}"
+        cached = self._upload_cache.get(cache_key)
+        if cached:
+            logger.debug("Using cached upload result for %s", cache_key)
+            return dict(cached)
+
+        try:
+            client = self._get_client()
+            files = {"file": (file_name, data, content_type)}
+            resp = await client.post(f"{self.base_url}/v1/files", headers=headers, files=files)
+            status = resp.status_code
+            text = resp.text
+            try:
+                j = resp.json()
+            except Exception:
+                j = None
+
+            result: Dict[str, Any] = {
+                "status_code": status,
+                "headers": dict(resp.headers),
+                "file_name_used": file_name,
+                "file_alias_used": alias_used,
+                "file_size": file_size,
+                "file_sha256": file_hash,
+            }
+            if j is not None:
+                if isinstance(j, dict):
+                    result.update(j)
+                else:
+                    result["json"] = j
+            else:
+                result["text"] = text
+
+            if status >= 400:
+                logger.warning("Upload (bytes) returned status %s: %s", status, text[:400])
+            else:
+                try:
+                    self._upload_cache[cache_key] = dict(result)
+                    if len(self._upload_cache) > 256:
+                        self._upload_cache.pop(next(iter(self._upload_cache)))
+                except Exception:
+                    pass
+            return result
+        except (httpx.RequestError,) as re:
+            logger.warning("Upload (bytes) request error: %s", re)
+            return {"error": "request_error", "detail": str(re), "file_name_used": file_name, "file_alias_used": alias_used}
+        except Exception as e:
+            logger.exception("Unexpected error during upload (bytes): %s", e)
+            return {"error": "upload_failed", "detail": str(e), "file_name_used": file_name, "file_alias_used": alias_used}
+
+    async def send_bytes_and_query(self, data: bytes, file_name: str, prompt: str, folder: Optional[str] = None, stream: bool = False, alias: Optional[str] = None, assistant_id: Optional[str] = None) -> Dict[str, Any]:
+        """Upload in-memory bytes then call chat referencing that uploaded alias/file id. Mirrors send_pdf_and_query semantics."""
+        alias_used = alias or os.path.splitext(os.path.basename(file_name))[0]
+        up = await self.upload_bytes(data, file_name=file_name, folder=folder, alias=alias_used)
+
+        file_id = alias_used
+        file_name_used = alias_used
+        if isinstance(up, dict):
+            file_name_used = up.get("file_alias_used") or file_name_used
+
+        if isinstance(up, dict):
+            fid = up.get("id") or up.get("fileId") or up.get("file_id")
+            dfid = up.get("dataFileId") or up.get("data_file_id") or up.get("datafileid")
+            if not file_id and (fid or dfid):
+                file_id = fid or dfid
+
+        max_retries = 5
+        delay = 0.2
+        for attempt in range(1, max_retries + 1):
+            resp = await self.chat_with_file(
+                prompt,
+                file_id,
+                stream=stream,
+                assistant_id=assistant_id,
+                file_name_used=file_name_used,
+            )
+            if isinstance(resp, dict) and (
+                resp.get("error") == "document_no_pages"
+                or str(resp.get("code") or resp.get("status_code") or "") == "8024"
+            ):
+                if attempt == max_retries:
+                    return resp
+                await __import__("asyncio").sleep(delay)
+                delay *= 1.7
+                continue
+            return resp
+        return {"error": "chat_failed", "detail": "Retries exhausted"}
 
     async def send_pdf_and_query(self, file_path: str, prompt: str, folder: Optional[str] = None, stream: bool = False, alias: Optional[str] = None, assistant_id: Optional[str] = None) -> Dict[str, Any]:
         """

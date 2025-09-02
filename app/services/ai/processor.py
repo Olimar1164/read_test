@@ -1,10 +1,9 @@
 from typing import Any, Dict, Optional, AsyncGenerator, Union
 import re
 import json
-import traceback
 import httpx
 from dotenv import load_dotenv
-from httpx import Response, HTTPStatusError, RequestError
+from httpx import HTTPStatusError, RequestError
 import logging
 
 # Configure a proper hierarchical logger
@@ -51,9 +50,12 @@ class AIProcessor:
     @classmethod
     def _get_client(cls, timeout: int) -> httpx.AsyncClient:
         if cls._shared_client is None:
-            limits = httpx.Limits(max_connections=100, max_keepalive_connections=20)
-            # Use HTTP/1.1 by default on Heroku to avoid optional 'h2' dependency
-            cls._shared_client = httpx.AsyncClient(http2=False, timeout=timeout, limits=limits)
+            # conservative limits for Heroku dynos and faster connection failures
+            limits = httpx.Limits(max_connections=50, max_keepalive_connections=20)
+            # explicit shorter timeouts to fail fast on network/connect issues
+            timeout_obj = httpx.Timeout(connect=1.0, read=30.0, write=30.0, pool=5.0)
+            # disable trust_env to avoid proxy/env discovery overhead in simple deployments
+            cls._shared_client = httpx.AsyncClient(http2=False, timeout=timeout_obj, limits=limits, trust_env=False)
         return cls._shared_client
 
     @classmethod

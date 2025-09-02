@@ -1,19 +1,22 @@
-from fastapi import APIRouter, UploadFile, File, Form, BackgroundTasks
-from fastapi import Request
-import base64
-import os
-import logging
-from dotenv import load_dotenv
-from app.services.ai.saia_console_client import SAIAConsoleClient
-from app.background import job_store
-from fastapi.responses import StreamingResponse
 from typing import AsyncGenerator
 
-# standard libs used inside
+# Standard library
+import os
 import re
 import uuid
 import json
+import base64
+import logging
 import asyncio
+
+# Third-party
+from dotenv import load_dotenv
+from fastapi import APIRouter, UploadFile, File, Form, BackgroundTasks, Request
+from fastapi.responses import StreamingResponse
+
+# Local
+from app.services.ai.saia_console_client import SAIAConsoleClient
+from app.background import job_store
 from app.services.ai.processor import AIProcessor
 
 # Optional async file I/O
@@ -120,7 +123,6 @@ async def upload_pdf(
         # Alias format: <filename-stem>-<shortid>
         prompt_text = prompt or ""
         try:
-            import re, uuid
             stem = os.path.splitext(file.filename or "file")[0]
             stem = re.sub(r"[^A-Za-z0-9_\-]", "_", stem)[:40] or "file"
             unique_alias = f"{stem}-{uuid.uuid4().hex[:6]}"
@@ -149,6 +151,72 @@ async def upload_pdf(
 
         job_id = job_store.create(payload)
 
+        # Fast synchronous attempt (opt-in) to reduce latency for quick cases.
+        try:
+            fast_timeout = float(os.environ.get('FAST_CHAT_TIMEOUT', '0'))
+        except Exception:
+            fast_timeout = 0.0
+        if fast_timeout and fast_timeout > 0:
+            # get client (shared or temp)
+            try:
+                client = getattr(request.app.state, 'saia_client', None)
+                if client is None:
+                    client = SAIAConsoleClient(
+                        os.environ.get('GEAI_API_TOKEN'),
+                        os.environ.get('ORGANIZATION_ID'),
+                        os.environ.get('PROJECT_ID'),
+                        os.environ.get('ASSISTANT_ID', 'test_read'),
+                    )
+            except Exception:
+                client = None
+
+            if client is not None and hasattr(client, 'send_bytes_and_query'):
+                try:
+                    # attempt a fast in-memory chat referencing the uploaded bytes
+                    try:
+                        t = float(os.environ.get('FAST_CHAT_TIMEOUT', fast_timeout))
+                    except Exception:
+                        t = fast_timeout
+                    try:
+                        fast_resp = await __import__('asyncio').wait_for(
+                            client.send_bytes_and_query(
+                                base64.b64decode(payload['file_b64']),
+                                payload.get('filename') or 'file',
+                                payload['prompt'],
+                                folder=payload['folder'],
+                                alias=payload['alias'],
+                                assistant_id=payload['assistant'],
+                                stream=False,
+                            ),
+                            timeout=t,
+                        )
+                    except Exception:
+                        fast_resp = None
+
+                    if fast_resp is not None and not (
+                        isinstance(fast_resp, dict) and (
+                            fast_resp.get('error') == 'document_no_pages'
+                            or str(fast_resp.get('code') or fast_resp.get('status_code') or '') == '8024'
+                        )
+                    ):
+                        # success: mark job result and return immediately
+                        try:
+                            if hasattr(client, 'metrics'):
+                                client.metrics['fast_path_hits'] += 1
+                        except Exception:
+                            pass
+                        job_store.set_result(job_id, fast_resp)
+                        return {'status': 'finished', 'job_id': job_id, 'result': fast_resp}
+                    else:
+                        try:
+                            if hasattr(client, 'metrics'):
+                                client.metrics['fast_path_misses'] += 1
+                        except Exception:
+                            pass
+                except Exception:
+                    # ignore and proceed to enqueue worker
+                    pass
+
         async def _worker():
             try:
                 # Prefer shared instance from app.state created at startup; fallback to per-call client
@@ -160,31 +228,53 @@ async def upload_pdf(
                         os.environ.get('PROJECT_ID'),
                         os.environ.get('ASSISTANT_ID', 'test_read'),
                     )
-                tmp_dir = '/tmp/saia_demo'
-                os.makedirs(tmp_dir, exist_ok=True)
-                p = os.path.join(tmp_dir, payload['filename'])
-                # write decoded payload to temp file (use aiofiles when possible)
-                if HAVE_AIOFILES:
-                    try:
-                        async with aiofiles.open(p, 'wb') as fw:
-                            await fw.write(base64.b64decode(payload['file_b64']))
-                    except Exception:
-                        with open(p, 'wb') as fw:
-                            fw.write(base64.b64decode(payload['file_b64']))
+                # Prefer in-memory upload when client supports it to avoid disk I/O
+                data = base64.b64decode(payload['file_b64'])
+                # call in-memory path if available
+                if hasattr(client, 'send_bytes_and_query'):
+                    res = await client.send_bytes_and_query(
+                        data,
+                        payload.get('filename') or 'file',
+                        payload['prompt'],
+                        folder=payload['folder'],
+                        alias=payload['alias'],
+                        assistant_id=payload['assistant'],
+                        stream=False,
+                    )
                 else:
-                    with open(p, 'wb') as fw:
-                        fw.write(base64.b64decode(payload['file_b64']))
-                res = await client.send_pdf_and_query(
-                    p,
-                    payload['prompt'],
-                    folder=payload['folder'],
-                    alias=payload['alias'],
-                    assistant_id=payload['assistant']
-                )
-                try:
-                    os.remove(p)
-                except Exception:
-                    pass
+                    # fallback to temp file on disk
+                    tmp_dir = '/tmp/saia_demo'
+                    os.makedirs(tmp_dir, exist_ok=True)
+                    p = os.path.join(tmp_dir, payload['filename'])
+                    if HAVE_AIOFILES:
+                        try:
+                            async with aiofiles.open(p, 'wb') as fw:
+                                await fw.write(data)
+                        except Exception:
+                            with open(p, 'wb') as fw:
+                                fw.write(data)
+                    else:
+                        with open(p, 'wb') as fw:
+                            fw.write(data)
+                    try:
+                        # record that we had to use disk fallback
+                        try:
+                            if hasattr(client, 'metrics'):
+                                client.metrics['fallback_disk_used'] += 1
+                        except Exception:
+                            pass
+                        res = await client.send_pdf_and_query(
+                            p,
+                            payload['prompt'],
+                            folder=payload['folder'],
+                            alias=payload['alias'],
+                            assistant_id=payload['assistant']
+                        )
+                    finally:
+                        try:
+                            os.remove(p)
+                        except Exception:
+                            pass
                 job_store.set_result(job_id, res)
             except Exception as e:
                 job_store.set_error(job_id, str(e))
@@ -288,13 +378,13 @@ async def stream_alias(request: Request, alias: str):
     async def event_gen() -> AsyncGenerator[bytes, None]:
         # read minimal prompt referencing the file by alias
         prompt = f"Lee este archivo y resume: {{file:{alias}}}"
-        import asyncio, json
         ag = None
         try:
             # try to use streaming endpoint first, but guard with a short timeout for first fragment
             try:
                 ag = processor.process_stream(os.environ.get('ASSISTANT_ID', 'test_read'), prompt)
                 first = await asyncio.wait_for(anext(ag), timeout=0.8)
+
                 # helper to split large text into smaller chunks and emit them with tiny pauses
                 async def emit_text_pieces(text: str, piece_size: int = 120, pause: float = None):
                     # pause can be configured via STREAM_PAUSE env (seconds). If not set, default to 0.02
@@ -330,6 +420,7 @@ async def stream_alias(request: Request, alias: str):
                         yield piece
                 except Exception:
                     pass
+
                 # continue streaming remaining chunks
                 async for chunk in ag:
                     try:
@@ -341,6 +432,7 @@ async def stream_alias(request: Request, alias: str):
                             yield piece
                     except Exception:
                         continue
+
                 # signal completion to client
                 try:
                     yield f"data: {json.dumps({'done': True}, ensure_ascii=False)}\n\n".encode('utf-8')
