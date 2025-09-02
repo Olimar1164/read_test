@@ -35,25 +35,31 @@ class SAIAConsoleClient:
             "projectId": self.project_id,
         }
         self.processor = AIProcessor(
-            api_token, organization_id, project_id, base_url=f"{self.base_url}/chat", request_timeout=timeout
+            api_token,
+            organization_id,
+            project_id,
+            base_url=f"{self.base_url}/chat",
+            request_timeout=timeout,
         )
         # Simple in-memory caches per-process
         self._client: Optional[httpx.AsyncClient] = None
         self._upload_cache: Dict[str, Dict] = {}
         # simple runtime counters for observability (in-process)
         self.metrics = {
-            'upload_cache_hits': 0,
-            'upload_cache_misses': 0,
-            'fast_path_hits': 0,
-            'fast_path_misses': 0,
-            'fallback_disk_used': 0,
+            "upload_cache_hits": 0,
+            "upload_cache_misses": 0,
+            "fast_path_hits": 0,
+            "fast_path_misses": 0,
+            "fallback_disk_used": 0,
         }
 
     def _get_client(self) -> httpx.AsyncClient:
         if self._client is None:
             limits = httpx.Limits(max_connections=100, max_keepalive_connections=20)
             # Use HTTP/1.1 by default to avoid requiring the 'h2' package on Heroku
-            self._client = httpx.AsyncClient(http2=False, timeout=self.timeout, limits=limits)
+            self._client = httpx.AsyncClient(
+                http2=False, timeout=self.timeout, limits=limits
+            )
         return self._client
 
     @staticmethod
@@ -77,20 +83,29 @@ class SAIAConsoleClient:
     def _sha256(data: bytes) -> str:
         return hashlib.sha256(data).hexdigest()
 
-    async def upload_file(self, file_path: str, file_name: Optional[str] = None, folder: Optional[str] = None, alias: Optional[str] = None) -> Dict[str, Any]:
+    async def upload_file(
+        self,
+        file_path: str,
+        file_name: Optional[str] = None,
+        folder: Optional[str] = None,
+        alias: Optional[str] = None,
+    ) -> Dict[str, Any]:
         url = f"{self.base_url}/v1/files"
         orig_name = file_name or os.path.basename(file_path)
         multipart_filename = orig_name
 
         try:
-            # prefer aiofiles when available (module-level HAVE_AIOFILES expected)
+            # prefer aiofiles when available - detect locally to avoid circular imports
             try:
-                from app.api.endpoints import HAVE_AIOFILES
+                import aiofiles as _aiofiles  # type: ignore
+
+                have_aiofiles = True
             except Exception:
-                HAVE_AIOFILES = False
-            if HAVE_AIOFILES:
+                _aiofiles = None
+                have_aiofiles = False
+            if have_aiofiles and _aiofiles is not None:
                 try:
-                    async with __import__('aiofiles').open(file_path, 'rb') as fh:
+                    async with _aiofiles.open(file_path, "rb") as fh:
                         data = await fh.read()
                 except Exception:
                     with open(file_path, "rb") as fh:
@@ -118,13 +133,13 @@ class SAIAConsoleClient:
         if cached:
             logger.debug("Using cached upload result for %s", cache_key)
             try:
-                self.metrics['upload_cache_hits'] += 1
+                self.metrics["upload_cache_hits"] += 1
             except Exception:
                 pass
             return dict(cached)
         else:
             try:
-                self.metrics['upload_cache_misses'] += 1
+                self.metrics["upload_cache_misses"] += 1
             except Exception:
                 pass
 
@@ -170,30 +185,66 @@ class SAIAConsoleClient:
                     pass
             return result
         except UnicodeEncodeError as ue:
-            logger.warning("UnicodeEncodeError when sending headers, sanitized fileName: %s", ue)
+            logger.warning(
+                "UnicodeEncodeError when sending headers, sanitized fileName: %s", ue
+            )
             headers["fileName"] = self._sanitize_header_value(multipart_filename)
-            return {"error": "unicode_encode_error", "detail": str(ue), "file_name_used": multipart_filename, "file_alias_used": alias_used}
+            return {
+                "error": "unicode_encode_error",
+                "detail": str(ue),
+                "file_name_used": multipart_filename,
+                "file_alias_used": alias_used,
+            }
         except (httpx.RequestError,) as re:
             logger.warning("Upload request error: %s", re)
-            return {"error": "request_error", "detail": str(re), "file_name_used": multipart_filename, "file_alias_used": alias_used}
+            return {
+                "error": "request_error",
+                "detail": str(re),
+                "file_name_used": multipart_filename,
+                "file_alias_used": alias_used,
+            }
         except Exception as e:
             logger.exception("Unexpected error during upload: %s", e)
-            return {"error": "upload_failed", "detail": str(e), "file_name_used": multipart_filename, "file_alias_used": alias_used}
+            return {
+                "error": "upload_failed",
+                "detail": str(e),
+                "file_name_used": multipart_filename,
+                "file_alias_used": alias_used,
+            }
 
-    async def chat_with_file(self, prompt: str, file_id: str, stream: bool = False, assistant_id: Optional[str] = None, file_name_used: Optional[str] = None) -> Dict[str, Any]:
-        content = prompt.replace("{file}", f"{{file:{file_id}}}") if "{file}" in prompt else f"{prompt} Referencia a archivo:{{file:{file_id}}}"
+    async def chat_with_file(
+        self,
+        prompt: str,
+        file_id: str,
+        stream: bool = False,
+        assistant_id: Optional[str] = None,
+        file_name_used: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        content = (
+            prompt.replace("{file}", f"{{file:{file_id}}}")
+            if "{file}" in prompt
+            else f"{prompt} Referencia a archivo:{{file:{file_id}}}"
+        )
         aid = assistant_id or self.assistant_id
         extra_headers = {"fileName": file_name_used} if file_name_used else None
         try:
             try:
-                sent_payload = self.processor._prepare_payload(aid, content, stream=stream)
+                sent_payload = self.processor._prepare_payload(
+                    aid, content, stream=stream
+                )
             except Exception:
-                sent_payload = {"model": f"saia:assistant:{aid}", "messages": [{"role": "user", "content": content}], "stream": stream}
+                sent_payload = {
+                    "model": f"saia:assistant:{aid}",
+                    "messages": [{"role": "user", "content": content}],
+                    "stream": stream,
+                }
             sent_headers = dict(self.processor.headers)
             if extra_headers:
                 for k, v in extra_headers.items():
                     sent_headers[str(k)] = str(v)
-            resp = await self.processor.process(aid, content, extra_headers=extra_headers, stream=stream)
+            resp = await self.processor.process(
+                aid, content, extra_headers=extra_headers, stream=stream
+            )
             if isinstance(resp, dict):
                 resp.setdefault("sent_payload", sent_payload)
                 sh = dict(sent_headers)
@@ -205,7 +256,13 @@ class SAIAConsoleClient:
             logger.warning("Chat exception: %s", e)
             return {"error": "chat_failed", "detail": str(e)}
 
-    async def upload_bytes(self, data: bytes, file_name: str, folder: Optional[str] = None, alias: Optional[str] = None) -> Dict[str, Any]:
+    async def upload_bytes(
+        self,
+        data: bytes,
+        file_name: str,
+        folder: Optional[str] = None,
+        alias: Optional[str] = None,
+    ) -> Dict[str, Any]:
         """Upload in-memory bytes to SAIA files endpoint (same semantics as upload_file)."""
         # create a temporary path-like name for content-type guess
         fake_path = file_name or "file"
@@ -228,7 +285,9 @@ class SAIAConsoleClient:
         try:
             client = self._get_client()
             files = {"file": (file_name, data, content_type)}
-            resp = await client.post(f"{self.base_url}/v1/files", headers=headers, files=files)
+            resp = await client.post(
+                f"{self.base_url}/v1/files", headers=headers, files=files
+            )
             status = resp.status_code
             text = resp.text
             try:
@@ -253,7 +312,9 @@ class SAIAConsoleClient:
                 result["text"] = text
 
             if status >= 400:
-                logger.warning("Upload (bytes) returned status %s: %s", status, text[:400])
+                logger.warning(
+                    "Upload (bytes) returned status %s: %s", status, text[:400]
+                )
             else:
                 try:
                     self._upload_cache[cache_key] = dict(result)
@@ -264,15 +325,38 @@ class SAIAConsoleClient:
             return result
         except (httpx.RequestError,) as re:
             logger.warning("Upload (bytes) request error: %s", re)
-            return {"error": "request_error", "detail": str(re), "file_name_used": file_name, "file_alias_used": alias_used}
+            return {
+                "error": "request_error",
+                "detail": str(re),
+                "file_name_used": file_name,
+                "file_alias_used": alias_used,
+            }
         except Exception as e:
             logger.exception("Unexpected error during upload (bytes): %s", e)
-            return {"error": "upload_failed", "detail": str(e), "file_name_used": file_name, "file_alias_used": alias_used}
+            return {
+                "error": "upload_failed",
+                "detail": str(e),
+                "file_name_used": file_name,
+                "file_alias_used": alias_used,
+            }
 
-    async def send_bytes_and_query(self, data: bytes, file_name: str, prompt: str, folder: Optional[str] = None, stream: bool = False, alias: Optional[str] = None, assistant_id: Optional[str] = None) -> Dict[str, Any]:
-        """Upload in-memory bytes then call chat referencing that uploaded alias/file id. Mirrors send_pdf_and_query semantics."""
+    async def send_bytes_and_query(
+        self,
+        data: bytes,
+        file_name: str,
+        prompt: str,
+        folder: Optional[str] = None,
+        stream: bool = False,
+        alias: Optional[str] = None,
+        assistant_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Upload in-memory bytes then call chat referencing that uploaded
+        alias/file id. Mirrors send_pdf_and_query semantics.
+        """
         alias_used = alias or os.path.splitext(os.path.basename(file_name))[0]
-        up = await self.upload_bytes(data, file_name=file_name, folder=folder, alias=alias_used)
+        up = await self.upload_bytes(
+            data, file_name=file_name, folder=folder, alias=alias_used
+        )
 
         file_id = alias_used
         file_name_used = alias_used
@@ -281,7 +365,9 @@ class SAIAConsoleClient:
 
         if isinstance(up, dict):
             fid = up.get("id") or up.get("fileId") or up.get("file_id")
-            dfid = up.get("dataFileId") or up.get("data_file_id") or up.get("datafileid")
+            dfid = (
+                up.get("dataFileId") or up.get("data_file_id") or up.get("datafileid")
+            )
             if not file_id and (fid or dfid):
                 file_id = fid or dfid
 
@@ -301,13 +387,23 @@ class SAIAConsoleClient:
             ):
                 if attempt == max_retries:
                     return resp
-                await __import__("asyncio").sleep(delay)
+                    import asyncio
+
+                    await asyncio.sleep(delay)
                 delay *= 1.7
                 continue
             return resp
         return {"error": "chat_failed", "detail": "Retries exhausted"}
 
-    async def send_pdf_and_query(self, file_path: str, prompt: str, folder: Optional[str] = None, stream: bool = False, alias: Optional[str] = None, assistant_id: Optional[str] = None) -> Dict[str, Any]:
+    async def send_pdf_and_query(
+        self,
+        file_path: str,
+        prompt: str,
+        folder: Optional[str] = None,
+        stream: bool = False,
+        alias: Optional[str] = None,
+        assistant_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
         """
         Upload a file then call chat referencing that very file.
         - Use alias (fileName header) as the primary reference, mirroring Postman: {file:<alias>}.
@@ -315,7 +411,9 @@ class SAIAConsoleClient:
         - Retry when SAIA returns 8024.
         """
         alias_used = alias or os.path.splitext(os.path.basename(file_path))[0]
-        up = await self.upload_file(file_path, file_name=None, folder=folder, alias=alias_used)
+        up = await self.upload_file(
+            file_path, file_name=None, folder=folder, alias=alias_used
+        )
 
         # Prefer referencing by alias to match Postman behavior strictly
         file_id = alias_used
@@ -326,7 +424,9 @@ class SAIAConsoleClient:
         # Optional: if the server returned an explicit id, keep it as a fallback only
         if isinstance(up, dict):
             fid = up.get("id") or up.get("fileId") or up.get("file_id")
-            dfid = up.get("dataFileId") or up.get("data_file_id") or up.get("datafileid")
+            dfid = (
+                up.get("dataFileId") or up.get("data_file_id") or up.get("datafileid")
+            )
             if not file_id and (fid or dfid):
                 file_id = fid or dfid
 
@@ -347,7 +447,9 @@ class SAIAConsoleClient:
             ):
                 if attempt == max_retries:
                     return resp
-                await __import__("asyncio").sleep(delay)
+                import asyncio
+
+                await asyncio.sleep(delay)
                 delay *= 1.7
                 continue
             return resp
@@ -356,7 +458,7 @@ class SAIAConsoleClient:
     async def aclose(self) -> None:
         """Close the instance httpx client if created."""
         try:
-            if hasattr(self, '_client') and self._client is not None:
+            if hasattr(self, "_client") and self._client is not None:
                 try:
                     await self._client.aclose()
                 except Exception:
@@ -364,4 +466,3 @@ class SAIAConsoleClient:
                 self._client = None
         except Exception:
             pass
-

@@ -17,10 +17,11 @@ async def lifespan(app: FastAPI):
     # startup: create shared service instances and store on app.state for DI
     try:
         import os
-        token = os.environ.get('GEAI_API_TOKEN')
-        org = os.environ.get('ORGANIZATION_ID')
-        proj = os.environ.get('PROJECT_ID')
-        assistant = os.environ.get('ASSISTANT_ID', 'test_read')
+
+        token = os.environ.get("GEAI_API_TOKEN")
+        org = os.environ.get("ORGANIZATION_ID")
+        proj = os.environ.get("PROJECT_ID")
+        assistant = os.environ.get("ASSISTANT_ID", "test_read")
         if token and org and proj:
             # store instances for reuse by endpoints
             app.state.ai_processor = AIProcessor(token, org, proj)
@@ -46,7 +47,7 @@ async def lifespan(app: FastAPI):
         pass
     try:
         # close instance-level httpx client if created
-        if getattr(app.state, 'saia_client', None) is not None:
+        if getattr(app.state, "saia_client", None) is not None:
             try:
                 await app.state.saia_client.aclose()
             except Exception:
