@@ -189,7 +189,6 @@ async def websocket_endpoint(ws: WebSocket):
                             clients.remove(c)
                         except Exception:
                             pass
-                pass
     except WebSocketDisconnect:
         try:
             clients.remove(ws)
