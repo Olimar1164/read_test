@@ -1,32 +1,26 @@
-from typing import AsyncGenerator
+import asyncio
+import io
+import base64
+import json
+import logging
 
 # Standard library
 import os
 import re
 import uuid
-import json
-import base64
-import logging
-import asyncio
+from typing import AsyncGenerator
 
 # Third-party
 from dotenv import load_dotenv
-from fastapi import APIRouter, UploadFile, File, Form, BackgroundTasks, Request
+from fastapi import APIRouter, BackgroundTasks, File, Form, Request, UploadFile
 from fastapi.responses import StreamingResponse
 
-# Local
-from app.services.ai.saia_console_client import SAIAConsoleClient
+from app.api.utils import write_bytes
 from app.background import job_store
 from app.services.ai.processor import AIProcessor
 
-# Optional async file I/O
-try:
-    import aiofiles
-
-    HAVE_AIOFILES = True
-except Exception:
-    aiofiles = None
-    HAVE_AIOFILES = False
+# Local
+from app.services.ai.saia_console_client import SAIAConsoleClient
 
 # Optional PDF reader
 PdfReader = None
@@ -41,6 +35,11 @@ except Exception:
 load_dotenv()
 
 logger = logging.getLogger("app.api.endpoints")
+STEM_TRUNCATION_LENGTH = 40
+
+# Streaming caps to protect from runaway responses
+MAX_STREAM_TOTAL_BYTES = 1_000_000  # 1 MB
+MAX_STREAM_CHUNKS = 1000
 
 router = APIRouter()
 
@@ -85,20 +84,10 @@ async def upload_pdf(
             "detail": f"Extensión no soportada: {ext}",
         }
 
+    # Keep uploaded bytes in-memory and avoid disk I/O unless needed.
     tmp_dir = "/tmp/saia_demo"
     os.makedirs(tmp_dir, exist_ok=True)
-    tmp_path = os.path.join(tmp_dir, file.filename)
-    # save uploaded file to temp (use aiofiles when available to avoid blocking event loop)
-    if HAVE_AIOFILES:
-        try:
-            async with aiofiles.open(tmp_path, "wb") as f:
-                await f.write(contents)
-        except Exception:
-            with open(tmp_path, "wb") as f:
-                f.write(contents)
-    else:
-        with open(tmp_path, "wb") as f:
-            f.write(contents)
+    tmp_path = None
 
     upload_resp = None
     try:
@@ -107,7 +96,8 @@ async def upload_pdf(
             # Prefer using module-level PdfReader if available (imported at module load).
             if PdfReader is not None:
                 try:
-                    reader = PdfReader(tmp_path)
+                    # parse PDF from in-memory bytes to avoid disk writes
+                    reader = PdfReader(io.BytesIO(contents))
                     num_pages = len(reader.pages)
                     if num_pages == 0:
                         return {
@@ -116,7 +106,7 @@ async def upload_pdf(
                         }
                 except Exception:
                     logger.debug(
-                        "PdfReader falló al analizar el PDF; se usará heurístico de bytes como fallback."
+                        "PdfReader falló al analizar el PDF en memoria; se usará heurístico de bytes como fallback."
                     )
 
             # Fallback heuristics when PyPDF2 is not available or fails.
@@ -158,22 +148,16 @@ async def upload_pdf(
         prompt_text = prompt or ""
         try:
             stem = os.path.splitext(file.filename or "file")[0]
-            stem = re.sub(r"[^A-Za-z0-9_\-]", "_", stem)[:40] or "file"
+            stem = (
+                re.sub(r"[^A-Za-z0-9_\-]", "_", stem)[:STEM_TRUNCATION_LENGTH] or "file"
+            )
             unique_alias = f"{stem}-{uuid.uuid4().hex[:6]}"
         except Exception:
             unique_alias = os.path.splitext(file.filename or "file")[0] or "file"
+
         # In-process background task to avoid Heroku 30s timeouts without Redis
-        # read bytes for payload; prefer aiofiles when available
-        if HAVE_AIOFILES:
-            try:
-                async with aiofiles.open(tmp_path, "rb") as f:
-                    b = await f.read()
-            except Exception:
-                with open(tmp_path, "rb") as f:
-                    b = f.read()
-        else:
-            with open(tmp_path, "rb") as f:
-                b = f.read()
+        # use in-memory bytes for payload to avoid disk I/O and extra reads
+        b = contents
         payload = {
             "file_b64": base64.b64encode(b).decode("ascii"),
             "filename": file.filename,
@@ -290,14 +274,9 @@ async def upload_pdf(
                     tmp_dir = "/tmp/saia_demo"
                     os.makedirs(tmp_dir, exist_ok=True)
                     p = os.path.join(tmp_dir, payload["filename"])
-                    if HAVE_AIOFILES:
-                        try:
-                            async with aiofiles.open(p, "wb") as fw:
-                                await fw.write(data)
-                        except Exception:
-                            with open(p, "wb") as fw:
-                                fw.write(data)
-                    else:
+                    try:
+                        await write_bytes(p, data)
+                    except Exception:
                         with open(p, "wb") as fw:
                             fw.write(data)
                     try:
@@ -361,14 +340,9 @@ async def upload_stream(
     # save to temp first
     path = os.path.join(tmp_dir, f"{alias_used}-{uuid.uuid4().hex[:6]}")
     contents = await file.read()
-    if HAVE_AIOFILES:
-        try:
-            async with aiofiles.open(path, "wb") as fw:
-                await fw.write(contents)
-        except Exception:
-            with open(path, "wb") as fw:
-                fw.write(contents)
-    else:
+    try:
+        await write_bytes(path, contents)
+    except Exception:
         with open(path, "wb") as fw:
             fw.write(contents)
 
@@ -461,8 +435,13 @@ async def stream_alias(request: Request, alias: str):
                             part = text[i:i + piece_size]
                             i += piece_size
                             try:
-                                yield f"data: {json.dumps({'text': part}, ensure_ascii=False)}\n\n".encode("utf-8")
-                            except Exception:
+                                yield f"data: {json.dumps({'text': part}, ensure_ascii=False)}\n\n".encode(
+                                    "utf-8"
+                                )
+                            except Exception as e:
+                                logger.exception(
+                                    "emit_text_pieces: fallo al emitir trozo: %s", e
+                                )
                                 continue
                             try:
                                 await asyncio.sleep(pause)
@@ -568,7 +547,9 @@ async def stream_alias(request: Request, alias: str):
                 part = text[i:i + max_chunk]
                 i += max_chunk
                 try:
-                    yield f"data: {json.dumps({'text': part}, ensure_ascii=False)}\n\n".encode("utf-8")
+                    yield f"data: {json.dumps({'text': part}, ensure_ascii=False)}\n\n".encode(
+                        "utf-8"
+                    )
                 except Exception:
                     continue
                 # small pause to allow client to render progressively; controlled by STREAM_PAUSE
@@ -586,7 +567,9 @@ async def stream_alias(request: Request, alias: str):
                     pass
             # final marker
             try:
-                yield f"data: {json.dumps({'done': True}, ensure_ascii=False)}\n\n".encode("utf-8")
+                yield f"data: {json.dumps({'done': True}, ensure_ascii=False)}\n\n".encode(
+                    "utf-8"
+                )
             except Exception:
                 pass
 

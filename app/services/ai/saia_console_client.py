@@ -1,10 +1,12 @@
+import asyncio
 import hashlib
-import httpx
 import logging
 import mimetypes
 import os
 import unicodedata
-from typing import Optional, Dict, Any
+from typing import Any, Dict, Optional
+
+import httpx
 
 from app.services.ai.processor import AIProcessor
 
@@ -386,10 +388,16 @@ class SAIAConsoleClient:
                 or str(resp.get("code") or resp.get("status_code") or "") == "8024"
             ):
                 if attempt == max_retries:
+                    # final attempt exhausted: wait briefly to allow ingestion to finish, then return
+                    try:
+                        await asyncio.sleep(delay)
+                    except Exception:
+                        pass
                     return resp
-                    import asyncio
-
+                try:
                     await asyncio.sleep(delay)
+                except Exception:
+                    pass
                 delay *= 1.7
                 continue
             return resp

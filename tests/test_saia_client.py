@@ -1,6 +1,7 @@
+import httpx
 import pytest
 import respx
-import httpx
+
 from app.services.ai.saia_console_client import SAIAConsoleClient
 
 

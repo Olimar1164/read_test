@@ -1,8 +1,11 @@
-from fastapi import FastAPI, Request
 from contextlib import asynccontextmanager
-from fastapi.templating import Jinja2Templates
+
+from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse
+from fastapi.templating import Jinja2Templates
+
 from app.api.endpoints import router
+from app.whiteboard import register_whiteboard
 
 # Import shared clients at module level as requested (keeps imports visible and predictable)
 from app.services.ai.processor import AIProcessor
@@ -10,6 +13,7 @@ from app.services.ai.saia_console_client import SAIAConsoleClient
 
 app = FastAPI()
 app.include_router(router)
+register_whiteboard(app)
 
 
 @asynccontextmanager

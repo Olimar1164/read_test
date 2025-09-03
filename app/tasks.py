@@ -1,7 +1,8 @@
-import os
+import asyncio
 import base64
 import logging
-import asyncio
+import os
+
 from redis import Redis
 from rq import Queue
 

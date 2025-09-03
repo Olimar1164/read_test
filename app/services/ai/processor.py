@@ -1,12 +1,13 @@
-from typing import Any, Dict, Optional, AsyncGenerator, Union
-import re
 import json
+import logging
+import re
+import time
+import uuid
+from typing import Any, AsyncGenerator, Dict, Optional, Union
+
 import httpx
 from dotenv import load_dotenv
 from httpx import HTTPStatusError, RequestError
-import logging
-import time
-import uuid
 
 # Configure a proper hierarchical logger
 logger = logging.getLogger("app.services.ai.processor")
@@ -200,9 +201,7 @@ class AIProcessor:
                 # Defensive: if response shape is unexpected, return the raw data instead of raising
                 result = data
             elapsed = time.time() - start_time
-            logger.debug(
-                f"[{request_id}] Procesamiento completado en {elapsed:.2f}s"
-            )
+            logger.debug(f"[{request_id}] Procesamiento completado en {elapsed:.2f}s")
             return result
         except HTTPStatusError as e:
             # include upstream response body for debugging
