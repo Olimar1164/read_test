@@ -59,9 +59,15 @@ class SAIAConsoleClient:
         if self._client is None:
             limits = httpx.Limits(max_connections=100, max_keepalive_connections=20)
             # Use HTTP/1.1 by default to avoid requiring the 'h2' package on Heroku
-            self._client = httpx.AsyncClient(
-                http2=False, timeout=self.timeout, limits=limits
+            # Use a structured Timeout object so we control connect/read/write separately.
+            # Keep connect short, but allow longer read/write for large uploads when running in a worker.
+            to = httpx.Timeout(
+                connect=float(os.environ.get("HTTPX_CONNECT_TIMEOUT", 10.0)),
+                read=float(os.environ.get("HTTPX_READ_TIMEOUT", max(60.0, float(self.timeout)))),
+                write=float(os.environ.get("HTTPX_WRITE_TIMEOUT", max(60.0, float(self.timeout)))),
+                pool=float(os.environ.get("HTTPX_POOL_TIMEOUT", 5.0)),
             )
+            self._client = httpx.AsyncClient(http2=False, timeout=to, limits=limits)
         return self._client
 
     @staticmethod
@@ -148,7 +154,17 @@ class SAIAConsoleClient:
         try:
             client = self._get_client()
             files = {"file": (multipart_filename, data, content_type)}
-            resp = await client.post(url, headers=headers, files=files)
+            logger.debug(
+                "Uploading file to %s size=%d headers=%s", url, file_size, {
+                    k: (v if k != "Authorization" else "Bearer *****") for k, v in headers.items()
+                }
+            )
+            try:
+                resp = await client.post(url, headers=headers, files=files)
+            except Exception as exc:
+                # Log detailed info to diagnose network/timeouts
+                logger.exception("Error de red en solicitud: %s", exc)
+                return {"error": "request_error", "detail": str(exc)}
             status = resp.status_code
             text = resp.text
             try:
@@ -287,9 +303,19 @@ class SAIAConsoleClient:
         try:
             client = self._get_client()
             files = {"file": (file_name, data, content_type)}
-            resp = await client.post(
-                f"{self.base_url}/v1/files", headers=headers, files=files
+            logger.debug(
+                "Uploading bytes to %s size=%d headers=%s",
+                f"{self.base_url}/v1/files",
+                file_size,
+                {k: (v if k != "Authorization" else "Bearer *****") for k, v in headers.items()},
             )
+            try:
+                resp = await client.post(
+                    f"{self.base_url}/v1/files", headers=headers, files=files
+                )
+            except Exception as exc:
+                logger.exception("Error de red en solicitud (bytes): %s", exc)
+                return {"error": "request_error", "detail": str(exc)}
             status = resp.status_code
             text = resp.text
             try:
