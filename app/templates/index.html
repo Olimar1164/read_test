@@ -2,7 +2,7 @@
 <html>
 <head>
     <meta charset="utf-8" />
-    <title>Demo Metrocapital — Lectura de Archivos</title>
+    <title>Demo Metrocapital - Lectura de Archivos</title>
     <style>
         :root {
             /* dark theme defaults */
@@ -121,8 +121,10 @@
         <form id="pdfForm" enctype="multipart/form-data">
             <div class="row">
                 <input id="fileInput" type="file" name="file" accept="application/pdf,image/png,image/jpeg,text/csv,text/plain" required />
-                <!-- assistant fijo para demo (oculto) -->
-                <input type="hidden" name="assistant" value="test_read" />
+                    <!-- assistant se toma del servidor (ASSISTANT_ID) si no se provee en el formulario -->
+                    <label style="margin-left:8px; display:inline-flex; align-items:center; gap:8px;">
+                        <input id="streamToggle" type="checkbox" /> Stream
+                    </label>
                 <div style="flex:1"></div>
                 <button id="submitBtn" type="submit">Subir y preguntar</button>
             </div>
@@ -159,6 +161,32 @@
         const themeToggle = document.getElementById('themeToggle');
         const fileInput = document.getElementById('fileInput');
 
+        // streaming queue to render incoming SSE fragments smoothly (char-by-char)
+        let _streamQueue = [];
+        let _streamDraining = false;
+    const _streamCharDelay = 2; // ms per character (tuneable)
+    const _STREAM_FAST_THRESHOLD = 200; // if incoming chunk length > threshold, append immediately (fast path)
+
+        async function _drainStreamQueue() {
+            if (_streamDraining) return;
+            _streamDraining = true;
+            try {
+                while (_streamQueue.length) {
+                    const next = _streamQueue.shift() || '';
+                    // append a preceding newline only if result already has content
+                    if (next && result.textContent && !result.textContent.endsWith('\n')) result.textContent += '\n';
+                    // append char-by-char to create streaming typing effect
+                    for (let i = 0; i < next.length; ++i) {
+                        result.textContent += next.charAt(i);
+                        // yield to the event loop
+                        await new Promise(r => setTimeout(r, _streamCharDelay));
+                    }
+                }
+            } finally {
+                _streamDraining = false;
+            }
+        }
+
         function sortKeys(obj) {
             if (Array.isArray(obj)) return obj.map(sortKeys);
             if (obj && typeof obj === 'object') {
@@ -193,9 +221,14 @@
             const statusEl = document.getElementById('status');
             statusEl.style.display = 'none';
             statusEl.textContent = '';
-            loading.style.display = 'flex';
             submitBtn.disabled = true;
             resetBtnBottom.disabled = true;
+            // show loading overlay only when not streaming (we want streaming visible)
+            if (!document.getElementById('streamToggle').checked) {
+                loading.style.display = 'flex';
+            } else {
+                loading.style.display = 'none';
+            }
 
             const fd = new FormData(form);
             // client-side validation: size and extension
@@ -205,7 +238,7 @@
                 statusEl.textContent = 'Selecciona un archivo antes de enviar.';
                 loading.style.display = 'none';
                 submitBtn.disabled = false;
-                resetBtn.disabled = false;
+                resetBtnBottom.disabled = false;
                 return;
             }
             const maxBytes = 800 * 1024; // 800 KB
@@ -214,7 +247,7 @@
                 statusEl.textContent = `Archivo demasiado grande (${Math.round(file.size/1024)} KB). Tamaño máximo: 800 KB.`;
                 loading.style.display = 'none';
                 submitBtn.disabled = false;
-                resetBtn.disabled = false;
+                resetBtnBottom.disabled = false;
                 return;
             }
             const allowed = ['application/pdf','image/png','image/jpeg','text/csv','text/plain'];
@@ -227,11 +260,83 @@
                     statusEl.textContent = 'Tipo de archivo no soportado. Usa pdf, png, jpg o csv.';
                     loading.style.display = 'none';
                     submitBtn.disabled = false;
-                    resetBtn.disabled = false;
+                    resetBtnBottom.disabled = false;
                     return;
                 }
             }
             try {
+                // If stream mode, upload to /upload_stream and open EventSource; do not show the overlay so streaming is visible
+                if (document.getElementById('streamToggle').checked) {
+                    const r2 = await fetch('/upload_stream', { method: 'POST', body: fd });
+                    let j2;
+                    try { j2 = await r2.json(); } catch (e) { j2 = null; }
+                    if (j2 && j2.alias) {
+                        // ensure overlay is hidden so user sees streaming output
+                        loading.style.display = 'none';
+                        result.textContent = '';
+                        try {
+                            const ev = new EventSource(`/stream/${encodeURIComponent(j2.alias)}`);
+                                const statusEl = document.getElementById('status');
+                                statusEl.style.display = 'block';
+                                statusEl.textContent = 'Recibiendo (stream)…';
+                                let streamClosedByServer = false;
+                                ev.onmessage = (e) => {
+                                    try {
+                                        const d = JSON.parse(e.data);
+                                        // if server signals done, close stream after queue drains
+                                        if (d && d.done) {
+                                            streamClosedByServer = true;
+                                            try { ev.close(); } catch (_) {}
+                                            // once queue is empty, mark complete
+                                            (async () => {
+                                                // wait for queue to drain
+                                                while (_streamDraining || _streamQueue.length) {
+                                                    await new Promise(r => setTimeout(r, 30));
+                                                }
+                                                statusEl.textContent = 'Completo (stream)';
+                                                submitBtn.disabled = false;
+                                                resetBtnBottom.disabled = false;
+                                            })();
+                                            return;
+                                        }
+                                        // prefer chunk 'text' or whole object
+                                        let incoming = '';
+                                        if (d && d.text) incoming = d.text;
+                                        else incoming = JSON.stringify(d, null, 2);
+                                        // If incoming fragment is long, append quickly (fast path) to minimize latency
+                                        if (incoming.length > _STREAM_FAST_THRESHOLD) {
+                                            // ensure newline separation
+                                            if (incoming && result.textContent && !result.textContent.endsWith('\n')) result.textContent += '\n';
+                                            result.textContent += incoming;
+                                        } else {
+                                            // enqueue for smooth char-by-char rendering
+                                            _streamQueue.push(incoming);
+                                            _drainStreamQueue();
+                                        }
+                                    } catch (err) {
+                                        // if parsing fails, append raw
+                                        _streamQueue.push(e.data || '');
+                                        _drainStreamQueue();
+                                    }
+                                };
+                                ev.onerror = () => {
+                                    try { ev.close(); } catch (_) {}
+                                    if (!streamClosedByServer) {
+                                        statusEl.textContent = 'Error en stream';
+                                    }
+                                    submitBtn.disabled = false;
+                                    resetBtnBottom.disabled = false;
+                                };
+                        } catch (err) {
+                            // no-op
+                        }
+                        // done: skip the regular polling flow
+                        submitBtn.disabled = false;
+                        resetBtnBottom.disabled = false;
+                        return;
+                    }
+                    // fallback: continue to regular upload path if /upload_stream failed
+                }
                 const r = await fetch('/upload_pdf', { method: 'POST', body: fd });
                 const txt = await r.text();
                 let parsed;

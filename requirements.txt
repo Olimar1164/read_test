@@ -1,11 +1,14 @@
+
 fastapi
 uvicorn[standard]
+gunicorn
 httpx
 python-multipart
+aiofiles
+PyPDF2
 python-dotenv
 jinja2
 motor
 pytest
 pytest-asyncio
 respx
-gunicorn

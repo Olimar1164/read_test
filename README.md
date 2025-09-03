@@ -1,44 +1,93 @@
-SAIA Console demo project
+Demo Lector de archivos (Proyecto de ejemplo)
 
-Minimal FastAPI app that uploads a file to SAIA Files API and then calls SAIA Chat referencing that same file. Includes a small HTML UI with light/dark mode.
+Pequeña aplicación en FastAPI que demuestra cómo:
 
-How it works
+- Subir un archivo al endpoint de Files de SAIA (Console API).
+- Enviar una consulta al chat de SAIA que referencia el archivo subido.
 
-- POST /v1/files: we upload the user file with headers: Authorization, organizationId, projectId, folder, fileName (alias). The alias is unique per upload to avoid reusing a previous file.
-- POST /chat: we send a prompt that references the file as `{file:<alias>}` and include `fileName` header for parity with Postman.
-- We briefly poll `dataFileUrl` to reduce ingestion races and retry chat when SAIA returns 8024 (document has no pages).
+El objetivo es mantener la demostración simple y reproducible en Heroku.
 
-Setup
+Contenido
+---------
 
-1) Create environment and install deps
+- `app/api/endpoints.py`: endpoints para subir archivos y orquestar la llamada al chat.
+- `app/services/ai/saia_console_client.py`: cliente ligero que sube archivos y llama al chat (incluye reintentos frente a la condición 8024).
+- `app/main.py`: aplicación FastAPI y configuración de arranque.
+
+Requisitos
+----------
+
+- Python 3.10+
+- Virtualenv (recomendado)
+- Variables de entorno: `GEAI_API_TOKEN`, `ORGANIZATION_ID`, `PROJECT_ID`, `ASSISTANT_ID`
+
+Instalación y ejecución local
+----------------------------
+
+1. Crear y activar entorno virtual
 
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
+```
+
+2. Instalar dependencias
+
+```bash
 pip install -r requirements.txt
 ```
 
-2) Configure env vars in `.env`
+3. Configurar variables de entorno
 
-- GEAI_API_TOKEN
-- ORGANIZATION_ID
-- PROJECT_ID
-- ASSISTANT_ID
+Crear un archivo `.env` con las variables necesarias o exportarlas en tu shell:
 
-3) Run server
+```bash
+export GEAI_API_TOKEN="tu_token"
+export ORGANIZATION_ID="tu_org"
+export PROJECT_ID="tu_proyecto"
+export ASSISTANT_ID="tu_assistant"
+```
+
+4. Ejecutar la aplicación en desarrollo
 
 ```bash
 uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
 ```
 
-UI
+Uso (demo)
+-----------
 
-- Upload a PDF/PNG/JPG/CSV/TXT (<= 800 KB). While uploading, a full-screen loading overlay is shown.
-- The response appears in the dark panel. Use the “Modo claro/oscuro” toggle to switch themes; preference is persisted.
-- “Reiniciar” clears the form/state.
+- Abre `http://localhost:8000/`.
+- Sube un archivo (PDF/PNG/JPG/CSV/TXT) de hasta ~800 KB.
+- La aplicación subirá el archivo a SAIA y enviará un prompt que lo referencia. La respuesta del asistente se muestra en la UI.
 
-Troubleshooting
+Notas técnicas y consideraciones
+--------------------------------
 
-- If chat returns a 8024 error, it will auto-retry a few times; ensure the uploaded file is valid and not empty.
-- If you see the previous file’s content, ensure your alias isn’t reused. The app auto-generates a unique alias per upload.
-- Check server logs for `status_code` and `dataFileUrl` to confirm successful upload and ingestion.
+- El cliente `SAIAConsoleClient` implementa:
+	- subida por archivo y por bytes en memoria,
+	- reintentos cortos frente a errores de ingestión (8024),
+	- caché en memoria por hash para evitar re-subidas inmediatas.
+- Diseño para Heroku:
+	- la app evita usar almacenamiento persistente localmente cuando es posible (usa la ruta en memoria). Si tu flujo requiere persistencia, añade Redis o una base de datos externa.
+	- limita el tamaño de los uploads para evitar bloqueos por tiempo de respuesta.
+
+Despliegue en Heroku (sencillo)
+--------------------------------
+
+1. Crear app y configurar variables (ejemplo):
+
+```bash
+heroku create mi-demo-saia
+heroku config:set GEAI_API_TOKEN="..." ORGANIZATION_ID="..." PROJECT_ID="..." ASSISTANT_ID="..."
+git push heroku HEAD:main
+heroku ps:scale web=1
+```
+
+2. Abrir la app y probar el flujo de subida y chat.
+
+Limitaciones
+------------
+
+- El estado en memoria (si lo hay) no sobrevive reinicios de dynos en Heroku.
+- Para producción se recomienda introducir persistencia y manejo de concurrencia más robusto.
