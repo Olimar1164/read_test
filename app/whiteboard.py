@@ -11,23 +11,44 @@ INDEX_HTML = """
     <meta charset="utf-8" />
     <title>Pizarra interactiva</title>
     <style>
-      html,body { height:100%; margin:0; }
-      body { font-family: Arial, sans-serif; display:flex; height:100%; }
-  #left { width:820px; padding:8px; box-sizing:border-box; position: relative; }
-      #board { background:#fff; border:1px solid #ccc; display:block; }
+  html,body { height:100%; margin:0; overflow:hidden; }
+  body { font-family: Arial, sans-serif; display:flex; height:100%; overflow:hidden; }
+  /* layout: left = board area, right = chat */
+  /* allow the left pane to shrink when the right pane is present */
+  #left { flex:1 1 auto; padding:8px; box-sizing:border-box; position: relative; min-width:0; }
+    #board { background:#fff; border:1px solid #ccc; display:block; width:100%; height:auto; }
   #toolbar { padding:6px 0; display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
   /* Icon button styles for eraser and undo - uniform square */
   .icon-btn { display:inline-flex; align-items:center; justify-content:center; min-width:64px; height:36px; padding:6px 10px; margin:0; border:1px solid #bbb; background:#fff; border-radius:6px; cursor:pointer; box-sizing:border-box; font-family: inherit; font-size: 13px; }
   .icon-btn.active { background:#e6f7ff; border-color:#66b3ff; }
   /* preview cursor inside the board */
-  #boardWrap { position: relative; }
+  /* boardWrap fills available left area while keeping a 4:3 aspect ratio */
+  #boardWrap { position: relative; width:100%; aspect-ratio: 4/3; margin:8px 0; overflow:hidden; }
   #cursorPreview { position: absolute; pointer-events: none; border-radius: 50%; box-sizing: border-box; border: 2px solid rgba(0,0,0,0.6); background: rgba(255,255,255,0.0); transform: translate(-50%, -50%); display:none; }
-      #right { flex:1; border-left:1px solid #eee; display:flex; flex-direction:column; }
-      #messages { flex:1; overflow:auto; padding:8px; background:#fafafa; }
-      .msg { margin:6px 0; }
-      #composer { display:flex; padding:8px; border-top:1px solid #eee; }
-      #composer input[type=text] { flex:1; padding:6px; margin-right:8px; }
-      #meta { font-size:12px; color:#333; margin-left:8px; }
+      /* make the chat column fixed and not allowed to grow from long messages */
+      #right { flex: 0 0 300px; width:300px; min-width:220px; max-width:360px; box-sizing:border-box; border-left:1px solid #eee; display:flex; flex-direction:column; }
+      /* responsive adjustments */
+      @media (max-width: 1400px) {
+        #right { width:280px; }
+      }
+      @media (max-width: 1200px) {
+        #right { width:260px; }
+      }
+      @media (max-width: 900px) {
+        /* stack vertically on small screens: board first, chat below */
+        body { flex-direction: column; }
+        #right { width:100%; border-left:none; border-top:1px solid #eee; }
+        #left { max-width:100%; }
+        #boardWrap { width:100%; margin:6px 0; }
+      }
+      #messages { flex:1; overflow:auto; padding:8px; background:#fafafa; box-sizing:border-box; word-break: break-word; white-space: pre-wrap; }
+      .msg { margin:6px 0; word-break: break-word; white-space: pre-wrap; }
+      #composer { display:flex; padding:8px; border-top:1px solid #eee; box-sizing:border-box; }
+      #composer input[type=text] { flex:1; padding:6px; margin-right:8px; min-width:0; box-sizing:border-box; }
+      #composer input[name=name] { width:120px; flex: 0 0 120px; margin-right:8px; }
+      #composer button { flex: 0 0 auto; }
+      /* ensure meta text stays inline and doesn't push layout */
+      #meta { font-size:12px; color:#333; margin-left:8px; white-space:nowrap; }
     </style>
   </head>
   <body>
@@ -43,10 +64,10 @@ INDEX_HTML = """
     <label>Color: <input id="color" type="color" value="#000000"></label>
     <label>Tamaño: <input id="size" type="range" min="1" max="40" value="4"></label>
 
-  <span id="meta">Resolución pizarra: 800x600</span>
+  <span id="meta">Resolución pizarra: 1200x900</span>
   </div>
-      <div id="boardWrap" style="width:800px; height:600px; overflow:hidden; position:relative; border:1px solid #ddd; background:#fff;">
-        <canvas id="board" width="800" height="600" style="transform-origin: 0 0;"></canvas>
+      <div id="boardWrap" style="position:relative; border:1px solid #ddd; background:#fff;">
+        <canvas id="board" width="1200" height="900" style="transform-origin: 0 0; width:100%; height:100%; display:block;"></canvas>
         <div id="cursorPreview"></div>
       </div>
   <!-- zoom controls moved to bottom-left of the canvas area -->
@@ -58,6 +79,7 @@ INDEX_HTML = """
       </div>
     </div>
     <div id="right">
+      <div id="presence" style="padding:8px; border-bottom:1px solid #eee; font-size:13px; overflow:hidden;">En línea: <span id="presenceCount">0</span></div>
       <div id="messages"></div>
       <div id="composer">
         <input id="name" type="text" placeholder="Tu nombre" value="Anon" style="width:120px; margin-right:8px;" />
@@ -81,15 +103,25 @@ INDEX_HTML = """
   const zoomPctEl = document.getElementById('zoomPct');
       const zoomInBtn = document.getElementById('zoomIn');
       const zoomOutBtn = document.getElementById('zoomOut');
+  // boardWrap is used by coordinate/zoom helpers; declare early to avoid TDZ
+  const boardWrap = document.getElementById('boardWrap');
 
       function applyZoom(centerLogicalX, centerLogicalY) {
         // apply CSS translate + scale to account for pan and zoom
+        // clamp pan so canvas remains at least partially visible
+        const rect = boardWrap.getBoundingClientRect();
+        const maxPanX = rect.width; const maxPanY = rect.height;
+        // compute visual size of canvas under current zoom
+        const visW = canvas.width * zoom / (canvas.width / rect.width);
+        const visH = canvas.height * zoom / (canvas.height / rect.height);
+        // basic clamps (allow some movement but avoid moving fully out)
+        panX = Math.min(Math.max(panX, rect.width - visW - 40), 40);
+        panY = Math.min(Math.max(panY, rect.height - visH - 40), 40);
         canvas.style.transform = 'translate(' + panX + 'px, ' + panY + 'px) scale(' + zoom + ')';
         zoomPctEl.textContent = Math.round(zoom * 100) + '%';
         // optionally center view on a logical coordinate: compute pan so that logical point stays visually centered
         if (typeof centerLogicalX === 'number' && typeof centerLogicalY === 'number') {
           // center the logical point in the visible board area
-          const rect = boardWrap.getBoundingClientRect();
           const visCx = rect.width / 2;
           const visCy = rect.height / 2;
           // compute where logical point maps to without pan
@@ -98,6 +130,9 @@ INDEX_HTML = """
           // update pan so that px,py land at vis center
           panX = visCx - px;
           panY = visCy - py;
+          // re-clamp after center calculation
+          panX = Math.min(Math.max(panX, rect.width - (canvas.width*zoom*rect.width/canvas.width) - 40), 40);
+          panY = Math.min(Math.max(panY, rect.height - (canvas.height*zoom*rect.height/canvas.height) - 40), 40);
           canvas.style.transform = 'translate(' + panX + 'px, ' + panY + 'px) scale(' + zoom + ')';
         }
       }
@@ -114,7 +149,7 @@ INDEX_HTML = """
   panX = 0; panY = 0;
   applyZoom();
       });
-      // initialize at 100%
+  // initialize at 100%
       zoom = 1.0;
       applyZoom();
       const colorEl = document.getElementById('color');
@@ -130,7 +165,6 @@ INDEX_HTML = """
       const cursorPreview = document.getElementById('cursorPreview');
 
   // pan state for hand tool
-  const boardWrap = document.getElementById('boardWrap');
   // panX/panY already declared above; ensure initialized
   panX = panX || 0; panY = panY || 0; // in pixels
       let isPanning = false;
@@ -191,6 +225,17 @@ INDEX_HTML = """
         }
       });
 
+      // when user reloads/leaves the page (F5, close tab) try to finish any active stroke
+      window.addEventListener('beforeunload', (ev) => {
+        try {
+          if (drawing && currentStrokeId) {
+            ws.send(JSON.stringify({ type: 'stroke_end', clientId: clientId, strokeId: currentStrokeId }));
+          }
+        } catch (e) {}
+        try { ws.close(); } catch (e) {}
+        // allow default unload (no preventDefault)
+      });
+
   document.getElementById('send').addEventListener('click', sendChat);
       textEl.addEventListener('keydown', (e) => { if (e.key === 'Enter') sendChat(); });
 
@@ -224,7 +269,16 @@ INDEX_HTML = """
         const rect = boardWrap.getBoundingClientRect();
         const xVis = e.clientX - rect.left;
         const yVis = e.clientY - rect.top;
-        return { x: (xVis - panX) / zoom, y: (yVis - panY) / zoom, xVis, yVis };
+        // account for CSS scaling of canvas (canvas.width may be larger than rect.width)
+        const scaleX = canvas.width / rect.width;
+        const scaleY = canvas.height / rect.height;
+        // map visual coords into canvas pixel coordinates, then undo pan/zoom
+        const canvasX = xVis * scaleX;
+        const canvasY = yVis * scaleY;
+        // panX/Y are in CSS pixels; convert to canvas pixels before subtracting
+        const panCanvasX = panX * scaleX;
+        const panCanvasY = panY * scaleY;
+        return { x: (canvasX - panCanvasX) / zoom, y: (canvasY - panCanvasY) / zoom, xVis, yVis };
       }
 
       canvas.addEventListener('pointerdown', (e) => {
@@ -295,6 +349,13 @@ INDEX_HTML = """
           const dy = e.clientY - panStart.y;
           panX = startPanX + dx;
           panY = startPanY + dy;
+          // clamp pan to keep canvas visible inside boardWrap
+          try {
+            const rect = boardWrap.getBoundingClientRect();
+            const visW = rect.width; const visH = rect.height;
+            panX = Math.min(Math.max(panX, visW - (canvas.width * zoom / (canvas.width / rect.width)) - 40), 40);
+            panY = Math.min(Math.max(panY, visH - (canvas.height * zoom / (canvas.height / rect.height)) - 40), 40);
+          } catch (err) {}
           // apply transform to canvas via CSS translate
           canvas.style.transform = 'translate(' + panX + 'px, ' + panY + 'px) scale(' + zoom + ')';
           return;
@@ -324,16 +385,20 @@ INDEX_HTML = """
         cursorPreview.style.borderColor = currentTool === 'eraser' ? 'rgba(200,20,20,0.9)' : 'rgba(0,0,0,0.6)';
         if (!e) { cursorPreview.style.display = 'none'; return; }
         // compute position inside boardWrap and account for canvas transform
-        const coords = toLogical(e);
-        // xVis/yVis are the visual coordinates where the logical point is drawn
-        cursorPreview.style.left = coords.xVis + 'px';
-        cursorPreview.style.top = coords.yVis + 'px';
+  const coords = toLogical(e);
+  // xVis/yVis are the visual coordinates where the logical point is drawn
+  // if boardWrap rect is tiny for any reason, fallback to center
+  const r = boardWrap.getBoundingClientRect();
+  const left = (typeof coords.xVis === 'number') ? coords.xVis : (r.width/2 || 100);
+  const top = (typeof coords.yVis === 'number') ? coords.yVis : (r.height/2 || 100);
+  cursorPreview.style.left = left + 'px';
+  cursorPreview.style.top = top + 'px';
         cursorPreview.style.display = 'block';
       }
 
       ws.addEventListener('open', () => {
         // announce ourselves so server can map ws -> clientId
-        ws.send(JSON.stringify({ type: 'join', clientId: clientId, name: nameEl.value || 'Anon' }));
+    ws.send(JSON.stringify({ type: 'join', clientId: clientId, name: nameEl.value || 'Anon' }));
       });
 
       ws.addEventListener('message', (ev) => {
@@ -341,6 +406,13 @@ INDEX_HTML = """
           const m = JSON.parse(ev.data);
           if (m.type === 'fill') {
             try { floodFill(canvas, m.x|0, m.y|0, m.color); } catch (err) { console.warn('remote fill err', err); }
+            return;
+          }
+          if (m.type === 'presence') {
+            try {
+              const pEl = document.getElementById('presenceCount');
+              if (pEl) pEl.textContent = String(m.count || 0);
+            } catch (e) {}
             return;
           }
           if (m.type === 'stroke_start') {
@@ -459,7 +531,7 @@ INDEX_HTML = """
       }
 
       // improved flood fill (scanline) with color tolerance to handle anti-aliased edges
-      function floodFill(canvasEl, startX, startY, fillColor, tolerance = 40) {
+      function floodFill(canvasEl, startX, startY, fillColor, tolerance = 50) {
         // robust scanline flood-fill that compares against the original pixels
         const ctxLocal = canvasEl.getContext('2d');
         const w = canvasEl.width;
@@ -469,6 +541,13 @@ INDEX_HTML = """
         const data = img.data;
         // copy original pixels for reference comparisons (so writing doesn't affect checks)
         const orig = new Uint8ClampedArray(data);
+
+        // treat fully transparent pixels as white (so eraser cuts become white areas for fill)
+        function getColorAt(off) {
+          const a = orig[off+3];
+          if (a === 0) return [255,255,255,255];
+          return [orig[off], orig[off+1], orig[off+2], a];
+        }
 
         function colorToRgba(hex) {
           const v = hex.replace('#','');
@@ -486,11 +565,11 @@ INDEX_HTML = """
         }
 
         // compute target color as the average of a 3x3 neighborhood around start to be tolerant of anti-aliasing
-        const samples = [];
+    const samples = [];
         for (let yy = Math.max(0, startY-1); yy <= Math.min(h-1, startY+1); yy++) {
           for (let xx = Math.max(0, startX-1); xx <= Math.min(w-1, startX+1); xx++) {
-            const off = (yy * w + xx) * 4;
-            samples.push([orig[off], orig[off+1], orig[off+2], orig[off+3]]);
+      const off = (yy * w + xx) * 4;
+      samples.push(getColorAt(off));
           }
         }
         const targetColor = samples.reduce((acc, s) => { acc[0]+=s[0]; acc[1]+=s[1]; acc[2]+=s[2]; return acc; }, [0,0,0]);
@@ -512,14 +591,14 @@ INDEX_HTML = """
           // move left while matching target in orig
           while (nx >= 0) {
             const off = (y * w + nx) * 4;
-            const col = [orig[off], orig[off+1], orig[off+2], orig[off+3]];
+            const col = getColorAt(off);
             if (colorDistSquared(col, targetColor) <= tolSq) nx--; else break;
           }
           nx++;
           let spanUp = false, spanDown = false;
           while (nx < w) {
             const off = (y * w + nx) * 4;
-            const origCol = [orig[off], orig[off+1], orig[off+2], orig[off+3]];
+            const origCol = getColorAt(off);
             if (colorDistSquared(origCol, targetColor) > tolSq) break;
             const idx = y * w + nx;
             if (!visited[idx]) {
@@ -529,21 +608,21 @@ INDEX_HTML = """
               // queue above
               if (!spanUp && y > 0) {
                 const offUp = ((y-1) * w + nx) * 4;
-                const colUp = [orig[offUp], orig[offUp+1], orig[offUp+2], orig[offUp+3]];
+                const colUp = getColorAt(offUp);
                 if (colorDistSquared(colUp, targetColor) <= tolSq) { stack.push([nx, y-1]); spanUp = true; }
               } else if (spanUp && y > 0) {
                 const offUp = ((y-1) * w + nx) * 4;
-                const colUp = [orig[offUp], orig[offUp+1], orig[offUp+2], orig[offUp+3]];
+                const colUp = getColorAt(offUp);
                 if (colorDistSquared(colUp, targetColor) > tolSq) spanUp = false;
               }
               // queue below
               if (!spanDown && y < h-1) {
                 const offDown = ((y+1) * w + nx) * 4;
-                const colDown = [orig[offDown], orig[offDown+1], orig[offDown+2], orig[offDown+3]];
+                const colDown = getColorAt(offDown);
                 if (colorDistSquared(colDown, targetColor) <= tolSq) { stack.push([nx, y+1]); spanDown = true; }
               } else if (spanDown && y < h-1) {
                 const offDown = ((y+1) * w + nx) * 4;
-                const colDown = [orig[offDown], orig[offDown+1], orig[offDown+2], orig[offDown+3]];
+                const colDown = getColorAt(offDown);
                 if (colorDistSquared(colDown, targetColor) > tolSq) spanDown = false;
               }
             }
@@ -661,7 +740,7 @@ async def websocket_endpoint(ws: WebSocket):
   await ws.accept()
   # send current state immediately
   try:
-    init = {"type": "init", "strokes": strokes, "chat": chat_history, "fills": fills, "actions": actions}
+    init = {"type": "init", "strokes": strokes, "chat": chat_history, "fills": fills, "actions": actions, "presence": {"count": len(clients) + 1}}
     await ws.send_text(json.dumps(init))
   except Exception:
     pass
@@ -686,6 +765,13 @@ async def websocket_endpoint(ws: WebSocket):
         if cid:
           ws_client_map[ws] = cid
         # no broadcast needed
+        # broadcast presence (new connection was already added to clients set earlier)
+        try:
+          broadcast = {"type": "presence", "count": len(clients)}
+          for c in list(clients):
+            await c.send_text(json.dumps(broadcast))
+        except Exception:
+          pass
 
       elif mtype == "stroke_start":
         # create a new stroke object
@@ -813,7 +899,17 @@ async def websocket_endpoint(ws: WebSocket):
 
   except WebSocketDisconnect:
     # remove ws cleanly
-    clients.discard(ws)
+      clients.discard(ws)
+      # broadcast updated presence
+      try:
+        broadcast = {"type": "presence", "count": len(clients)}
+        for c in list(clients):
+          try:
+            await c.send_text(json.dumps(broadcast))
+          except Exception:
+            clients.discard(c)
+      except Exception:
+        pass
   except Exception:
     # ensure client is removed on unexpected errors
     clients.discard(ws)
